@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Planning scaffold.** This repository currently contains product and implementation documentation only. No application binary, successful build, automated test result, installer, or signed package is claimed yet.
+**Foundation in progress.** The repository contains a pinned .NET 8 solution, an Avalonia empty-shelf shell, architecture-boundary tests, and Windows/macOS CI quality gates. Core item behavior, persistence, drag/drop, native integrations, and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
 
 ### Milestones
 
@@ -84,17 +84,22 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 5. Privacy controls, export, recovery, and tests
 6. Windows/macOS packaging and first release candidate
 
-## Development quickstart (planned)
+## Development quickstart
 
-The planned stack is .NET 8, C#, Avalonia UI, SQLite, and xUnit. After the project skeleton lands:
+Install the .NET 8 SDK selected by `global.json` (currently 8.0.423), then run:
 
 ```bash
 git clone https://github.com/rwrife/drop-shelf.git
 cd drop-shelf
-dotnet restore
-dotnet build --configuration Release
-dotnet test --configuration Release
+dotnet restore DropShelf.sln
+dotnet format DropShelf.sln --verify-no-changes --no-restore
+dotnet build DropShelf.sln --configuration Release --no-restore
+dotnet test DropShelf.sln --configuration Release --no-build --no-restore
 ```
+
+The solution separates the UI-free core, infrastructure, Windows and macOS adapters, and Avalonia app under `src/`. Tests under `tests/` enforce dependency direction and exercise the empty shell with Avalonia's synthetic headless backend. GitHub Actions runs the same restore, formatting, Release build, and test gates on `windows-latest` and `macos-latest`.
+
+Headless tests verify the shell composition without opening a native window. They are not a substitute for manual Windows/macOS launch, accessibility, drag/drop, or destination-application testing.
 
 Platform packaging will use a Windows self-contained ZIP/MSIX path and a signed/notarizable macOS `.app`/DMG path. Signing and notarization credentials are not expected for ordinary local development.
 

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.423
+
+      - name: Restore
+        run: dotnet restore DropShelf.sln
+
+      - name: Verify formatting
+        run: dotnet format DropShelf.sln --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build DropShelf.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test DropShelf.sln --configuration Release --no-build --no-restore
