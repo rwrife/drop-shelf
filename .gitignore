@@ -1,0 +1,30 @@
+# .NET
+bin/
+obj/
+artifacts/
+TestResults/
+*.user
+*.suo
+
+# IDEs
+.vs/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local app/test data
+*.db
+*.db-shm
+*.db-wal
+coverage/
+
+# Packaging/signing
+*.pfx
+*.cer
+*.provisionprofile
+*.dmg
+*.msix
+*.zip
