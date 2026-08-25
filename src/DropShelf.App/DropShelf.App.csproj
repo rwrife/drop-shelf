@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../DropShelf.Core/DropShelf.Core.csproj" />
+    <ProjectReference Include="../DropShelf.Infrastructure/DropShelf.Infrastructure.csproj" />
+    <ProjectReference Include="../DropShelf.Platform.Windows/DropShelf.Platform.Windows.csproj" />
+    <ProjectReference Include="../DropShelf.Platform.macOS/DropShelf.Platform.macOS.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,29 @@
+<Window
+    x:Class="DropShelf.App.MainWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:automation="clr-namespace:Avalonia.Automation;assembly=Avalonia.Controls"
+    Title="Drop Shelf"
+    Width="420"
+    Height="180"
+    MinWidth="320"
+    MinHeight="140"
+    automation:AutomationProperties.Name="Drop Shelf empty shelf">
+  <Border Padding="24">
+    <StackPanel
+        HorizontalAlignment="Center"
+        VerticalAlignment="Center"
+        Spacing="8">
+      <TextBlock
+          HorizontalAlignment="Center"
+          FontSize="20"
+          FontWeight="SemiBold"
+          Text="Drop Shelf" />
+      <TextBlock
+          Name="EmptyShelfMessage"
+          HorizontalAlignment="Center"
+          Text="Drop files, text, or URLs here"
+          TextWrapping="Wrap" />
+    </StackPanel>
+  </Border>
+</Window>
