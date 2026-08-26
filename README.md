@@ -62,7 +62,7 @@ File items are references to their original paths by default; Drop Shelf does no
 - **Offline by default:** no telemetry, account, remote API, or network listener.
 - **Explicit collection:** only items the user drops or explicitly pastes into the shelf are recorded; the app does not monitor clipboard history.
 - **File behavior:** original paths and display metadata are stored locally. Files are not copied or moved unless a future managed-copy command is explicitly chosen.
-- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store and atomic writes/migrations.
+- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store, atomic writes, and transactional creation of the version 1 schema.
 - **Permissions:** macOS may require Accessibility permission only for an optional global shortcut implementation if the selected native API requires it; basic drag/drop remains useful without that permission. Windows needs no administrator access. Drop Shelf will explain permission purpose before opening OS settings.
 - **Cleanup:** unpinned items expire by policy, users can clear all metadata immediately, and uninstall documentation identifies the app-data directory.
 - **Export:** users can export settings and shelf metadata to a documented JSON format. Exported file references do not include file contents.
@@ -73,7 +73,38 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Foundation in progress.** The repository contains a pinned .NET 8 solution, an Avalonia empty-shelf shell, architecture-boundary tests, and Windows/macOS CI quality gates. Core item behavior, persistence, drag/drop, native integrations, and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
+**Core store implemented; desktop interaction remains in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia empty-shelf shell, and architecture-boundary tests. Drag/drop, native integrations, and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
+
+## Core domain and local store
+
+The canonical `ShelfItem` supports three explicit payloads: a file/directory reference, normalized plain text, or an absolute HTTP, HTTPS, or file URL. Items have stable caller-supplied IDs, UTC creation/last-used timestamps, pinned state, and dense zero-based ordinals. `ShelfSession` deterministically adds, reorders, removes, pins, expires, and refreshes file availability through its read-only `IFileSystem` boundary. An unpinned item expires when its last-used time is exactly at or before the retention boundary; pinned items are exempt.
+
+Inputs are treated as untrusted. Text is newline-normalized and limited to 65,536 characters; display/source labels, paths, URLs, item counts, and exports also have explicit limits. Validation failures carry a typed error code and field. URL credentials, malformed URLs, and schemes other than HTTP(S)/file are rejected. File items persist only their original qualified path and optional kind/size/modified/availability metadata. Core exposes no copy, move, delete, open, networking, telemetry, account, or clipboard-monitoring service.
+
+`SqliteShelfStore` stores the complete session and settings in a local SQLite database using atomic transactions. Schema version 1 is created on first use. A future schema fails explicitly; malformed databases or invalid/inconsistent rows fail the complete load and never return a partial shelf. The store does not access or mutate referenced source files.
+
+Default settings are: right dock edge, 24-hour retention, start-at-login off, reduced motion off, and high contrast off. Retention is configurable from one minute through 30 days. Settings may be persisted independently in one SQLite transaction without replacing shelf items.
+
+## JSON metadata export schema
+
+Metadata export is UTF-8 JSON with a maximum encoded size of 16 MiB and schema version `1`:
+
+```json
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-01-02T03:04:05+00:00",
+  "settings": {
+    "dockEdge": "right",
+    "retentionSeconds": 86400,
+    "startAtLogin": false,
+    "reduceMotion": false,
+    "highContrast": false
+  },
+  "items": []
+}
+```
+
+Each item contains its common metadata and only the fields for its declared kind: `text` for text; `url` and optional `title` for URLs; or `path`, `fileKind`, optional `sizeBytes`/`modifiedAt`, and `availability` for file references. Other kind-specific fields are null. Import re-runs all domain limits and kind consistency checks, rejects unknown or duplicate members and unknown schema versions, requires `exportedAt`, and is capped at 1,000 items. File bytes are never read, embedded, or exported. Exports can contain sensitive text and full local paths, so they should be protected like the source metadata.
 
 ### Milestones
 
@@ -97,7 +128,17 @@ dotnet build DropShelf.sln --configuration Release --no-restore
 dotnet test DropShelf.sln --configuration Release --no-build --no-restore
 ```
 
-The solution separates the UI-free core, infrastructure, Windows and macOS adapters, and Avalonia app under `src/`. Tests under `tests/` enforce dependency direction and exercise the empty shell with Avalonia's synthetic headless backend. GitHub Actions runs the same restore, formatting, Release build, and test gates on `windows-latest` and `macos-latest`.
+The solution separates the UI-free core, infrastructure, Windows and macOS adapters, and Avalonia app under `src/`. Tests under `tests/` exercise domain policies, hostile/oversized inputs, SQLite reopen/corruption/version behavior, architecture and privacy boundaries, and the empty shell with Avalonia's synthetic headless backend. The exact local verification commands are:
+
+```bash
+dotnet restore DropShelf.sln
+dotnet format DropShelf.sln --no-restore
+dotnet format DropShelf.sln --verify-no-changes --no-restore
+dotnet build DropShelf.sln --configuration Release --no-restore
+dotnet test DropShelf.sln --configuration Release --no-build --no-restore
+```
+
+GitHub Actions runs the formatting, Release build, and test gates on its configured Windows and macOS runners.
 
 Headless tests verify the shell composition without opening a native window. They are not a substitute for manual Windows/macOS launch, accessibility, drag/drop, or destination-application testing.
 

@@ -77,6 +77,19 @@ public sealed class ArchitectureBoundaryTests
         Assert.Empty(forbiddenReferences);
     }
 
+    [Fact]
+    public void ProductionGraphContainsNoPassiveClipboardMonitoring()
+    {
+        string sourceDirectory = Path.Combine(FindRepositoryRoot(), "src");
+        string[] prohibitedTerms = ["ClipboardMonitor", "ClipboardWatcher", "ClipboardHistory", "AddClipboardFormatListener"];
+        string[] offendingFiles = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .Where(path => Path.GetExtension(path) is ".cs" or ".csproj" or ".json" or ".axaml")
+            .Where(path => prohibitedTerms.Any(term => File.ReadAllText(path).Contains(term, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+
+        Assert.Empty(offendingFiles);
+    }
+
     private static string FindRepositoryRoot()
     {
         DirectoryInfo? directory = new(AppContext.BaseDirectory);
