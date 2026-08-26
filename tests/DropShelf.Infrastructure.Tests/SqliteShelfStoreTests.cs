@@ -45,7 +45,7 @@ public sealed class SqliteShelfStoreTests : IDisposable
     public async Task FutureSchemaFailsWithSpecificTypedError()
     {
         _ = Directory.CreateDirectory(directory);
-        await using SqliteConnection connection = new($"Data Source={DatabasePath}");
+        await using SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False");
         await connection.OpenAsync();
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText = "PRAGMA user_version=999;";
@@ -65,7 +65,7 @@ public sealed class SqliteShelfStoreTests : IDisposable
         File.Delete(DatabasePath);
         SqliteShelfStore store = new(DatabasePath);
         _ = await store.LoadAsync();
-        await using SqliteConnection connection = new($"Data Source={DatabasePath}");
+        await using SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False");
         await connection.OpenAsync();
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText = "INSERT INTO shelf_items(id,kind,display_name,created_at,last_used_at,is_pinned,ordinal,text_value) VALUES('bad',1,'ok','2026-01-01','2026-01-01',0,0,'valid-looking');";
@@ -78,13 +78,13 @@ public sealed class SqliteShelfStoreTests : IDisposable
     public async Task EmptyVersionZeroDatabaseMigratesToCurrentVersion()
     {
         _ = Directory.CreateDirectory(directory);
-        await using (SqliteConnection connection = new($"Data Source={DatabasePath}"))
+        await using (SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False"))
         {
             await connection.OpenAsync();
         }
 
         _ = await new SqliteShelfStore(DatabasePath).LoadAsync();
-        await using SqliteConnection reopened = new($"Data Source={DatabasePath}");
+        await using SqliteConnection reopened = new($"Data Source={DatabasePath};Pooling=False");
         await reopened.OpenAsync();
         await using SqliteCommand command = reopened.CreateCommand();
         command.CommandText = "PRAGMA user_version;";
@@ -95,7 +95,7 @@ public sealed class SqliteShelfStoreTests : IDisposable
     public async Task CurrentVersionDatabaseWithMalformedShapeIsRejected()
     {
         _ = Directory.CreateDirectory(directory);
-        await using SqliteConnection connection = new($"Data Source={DatabasePath}");
+        await using SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False");
         await connection.OpenAsync();
         await using SqliteCommand command = connection.CreateCommand();
         command.CommandText = "CREATE TABLE shelf_items(id TEXT); CREATE TABLE app_settings(singleton INTEGER); PRAGMA user_version=1;";
