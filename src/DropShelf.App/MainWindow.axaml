@@ -5,24 +5,22 @@
     xmlns:automation="clr-namespace:Avalonia.Automation;assembly=Avalonia.Controls"
     Title="Drop Shelf"
     Width="420"
-    Height="180"
+    Height="300"
     MinWidth="320"
-    MinHeight="140"
-    automation:AutomationProperties.Name="Drop Shelf empty shelf">
+    MinHeight="180"
+    automation:AutomationProperties.Name="Drop Shelf">
   <Border Padding="24">
-    <StackPanel
-        HorizontalAlignment="Center"
-        VerticalAlignment="Center"
-        Spacing="8">
-      <TextBlock
-          HorizontalAlignment="Center"
-          FontSize="20"
-          FontWeight="SemiBold"
-          Text="Drop Shelf" />
+    <StackPanel Spacing="10">
+      <TextBlock FontSize="20" FontWeight="SemiBold" Text="Drop Shelf" />
       <TextBlock
           Name="EmptyShelfMessage"
-          HorizontalAlignment="Center"
           Text="Drop files, text, or URLs here"
+          TextWrapping="Wrap" />
+      <StackPanel Name="ShelfItems" Spacing="6" />
+      <TextBlock
+          Name="DropStatus"
+          automation:AutomationProperties.Name="Drop status"
+          Text="Ready for a drop."
           TextWrapping="Wrap" />
     </StackPanel>
   </Border>

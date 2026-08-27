@@ -44,6 +44,29 @@ public sealed class ShelfSession
         NormalizeOrdinals();
     }
 
+    public void AddRange(IReadOnlyList<ShelfItem> newItems)
+    {
+        ArgumentNullException.ThrowIfNull(newItems);
+        if (newItems.Count == 0)
+        {
+            throw Input.Error(ValidationErrorCode.Required, nameof(newItems), "At least one item is required.");
+        }
+
+        if (newItems.Count > DomainLimits.MaxItems - items.Count)
+        {
+            throw Input.Error(ValidationErrorCode.TooLong, nameof(Items), "The shelf item limit would be exceeded.");
+        }
+
+        if (newItems.Any(item => item is null) || newItems.Select(item => item.Id).Distinct().Count() != newItems.Count ||
+            newItems.Any(item => items.Any(existing => existing.Id == item.Id)))
+        {
+            throw Input.Error(ValidationErrorCode.DuplicateIdentifier, nameof(newItems), "The items must be non-null and uniquely identified.");
+        }
+
+        items.AddRange(newItems);
+        NormalizeOrdinals();
+    }
+
     public void Reorder(Guid id, int newIndex)
     {
         int currentIndex = IndexOf(id);
