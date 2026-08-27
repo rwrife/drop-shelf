@@ -24,6 +24,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DropShelf.Core.Tests", "tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DropShelf.Infrastructure.Tests", "tests\DropShelf.Infrastructure.Tests\DropShelf.Infrastructure.Tests.csproj", "{B855F734-D2C0-43D3-865D-7F7CE8B4FCCD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DropShelf.Platform.Tests", "tests\DropShelf.Platform.Tests\DropShelf.Platform.Tests.csproj", "{20F9184E-E197-43FF-9C77-E58A03F039C2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -69,6 +71,10 @@ Global
 		{B855F734-D2C0-43D3-865D-7F7CE8B4FCCD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B855F734-D2C0-43D3-865D-7F7CE8B4FCCD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B855F734-D2C0-43D3-865D-7F7CE8B4FCCD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{20F9184E-E197-43FF-9C77-E58A03F039C2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{20F9184E-E197-43FF-9C77-E58A03F039C2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{20F9184E-E197-43FF-9C77-E58A03F039C2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{20F9184E-E197-43FF-9C77-E58A03F039C2}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{DE3A2DBD-F6D8-44F6-9BFE-B058FD582989} = {282D1181-985C-4DD0-BACE-C6E12DFFC9CA}
@@ -80,5 +86,6 @@ Global
 		{566EF1F0-A1D7-49A4-8D39-470887BC734E} = {B03EE8BF-AF62-4E96-A1C0-00CEB894194B}
 		{EF390EF1-F817-476A-B1B6-559978EB6464} = {B03EE8BF-AF62-4E96-A1C0-00CEB894194B}
 		{B855F734-D2C0-43D3-865D-7F7CE8B4FCCD} = {B03EE8BF-AF62-4E96-A1C0-00CEB894194B}
+		{20F9184E-E197-43FF-9C77-E58A03F039C2} = {B03EE8BF-AF62-4E96-A1C0-00CEB894194B}
 	EndGlobalSection
 EndGlobal

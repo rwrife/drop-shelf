@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Core store implemented; desktop interaction remains in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia empty-shelf shell, and architecture-boundary tests. Drag/drop, native integrations, and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
+**Core store and drag/drop conversion slice implemented; broader desktop interaction remains in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia shelf shell with inbound and outbound pointer drag wiring, and architecture-boundary tests. Broader shelf interactions and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
 
 ## Core domain and local store
 
@@ -143,6 +143,23 @@ GitHub Actions runs the formatting, Release build, and test gates on its configu
 Headless tests verify the shell composition without opening a native window. They are not a substitute for manual Windows/macOS launch, accessibility, drag/drop, or destination-application testing.
 
 Platform packaging will use a Windows self-contained ZIP/MSIX path and a signed/notarizable macOS `.app`/DMG path. Signing and notarization credentials are not expected for ordinary local development.
+
+## Drag/drop architecture (issue #3)
+
+Inbound drag data is captured as the UI-free `InboundDropPayload` contract in Core and converted atomically into canonical `ShelfItem` values. Multi-format precedence is explicit and deterministic:
+
+1. A non-empty file list wins and creates one file-reference item per path in source order.
+2. Otherwise an explicit native URL format creates one URL item.
+3. Otherwise plain text creates one text item, except that a complete HTTP, HTTPS, or file URL in text is canonicalized as a URL item.
+4. With none of those formats, the drop is rejected.
+
+The selected format is converted completely before `ShelfSession.AddRange` mutates the session. Empty, unsupported, malformed, oversized, over-capacity, or partly invalid payloads therefore produce no partial shelf items. The Avalonia window renders accepted items with type and safe display name; it never shows a full file path by default. Rejections render a bounded user-facing status that does not echo untrusted content.
+
+Core owns `INativeDragDropAdapter`, `InboundDropPayload`, and `NativeOutboundPayload`; it has no Avalonia or operating-system dependency. `DropShelf.Platform.Windows` maps the Windows data-object identifiers `FileDrop`, `UnicodeText`, and `UniformResourceLocatorW`. `DropShelf.Platform.macOS` maps the pasteboard identifiers `public.file-url`, `NSFilenamesPboardType`, `public.utf8-plain-text`, and `public.url`. File arrays retain caller selection order. The platform assemblies retain dictionary-shaped synthetic boundaries for hostile contract tests. In the running app, Avalonia 11.3's `DataTransfer`, `DataTransferItem`, universal file/text formats, and platform URL formats form the native host bridge to its Windows and macOS drag backends; no separate COM or AppKit implementation is claimed.
+
+The current Avalonia inbound handler accepts storage-item paths, explicit native URLs, and text supplied by an explicit drop gesture. URL-shaped text is recognized by Core. Rendered shelf cards expose an explicit pointer drag gesture that builds a live Avalonia transfer and invokes `DragDrop.DoDragDropAsync`; when the shelf contains at least two file or directory items, an aggregate “Drag all N files” handle transfers those items in current session order without adding general selection or reorder UX. File references are resolved through Avalonia storage APIs before the drag starts; if any selected reference cannot be resolved, no partial drag starts and a path-free error is shown. The app does not monitor the clipboard, contact a network, emit telemetry, use accounts, or read/copy/move/delete referenced file contents.
+
+Synthetic and headless tests verify inbound and outbound format mapping, live-transfer construction, precedence, order, atomic failures, safe UI status/rendering, and unchanged source paths and bytes. Real Windows/macOS host compatibility has not been manually tested: no real Explorer, Finder, browser, text-editor, COM, or AppKit drag was executed. See the [compatibility matrix](docs/drag-drop-compatibility.md); every manual result remains explicitly **Untested**.
 
 ## Contributing
 
