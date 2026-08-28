@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Core store and drag/drop conversion slice implemented; broader desktop interaction remains in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia shelf shell with inbound and outbound pointer drag wiring, and architecture-boundary tests. Broader shelf interactions and packaging remain to be implemented. No installer or signed/notarized package is claimed yet.
+**Accessible shelf interaction implemented; native desktop integration and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia docked shelf with inbound/outbound drag wiring, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, and architecture-boundary tests. Native copy/open/reveal integration remains behind explicit injectable failure-reporting boundaries for issue #5. No installer or signed/notarized package is claimed yet.
 
 ## Core domain and local store
 
@@ -160,6 +160,14 @@ Core owns `INativeDragDropAdapter`, `InboundDropPayload`, and `NativeOutboundPay
 The current Avalonia inbound handler accepts storage-item paths, explicit native URLs, and text supplied by an explicit drop gesture. URL-shaped text is recognized by Core. Rendered shelf cards expose an explicit pointer drag gesture that builds a live Avalonia transfer and invokes `DragDrop.DoDragDropAsync`; when the shelf contains at least two file or directory items, an aggregate “Drag all N files” handle transfers those items in current session order without adding general selection or reorder UX. File references are resolved through Avalonia storage APIs before the drag starts; if any selected reference cannot be resolved, no partial drag starts and a path-free error is shown. The app does not monitor the clipboard, contact a network, emit telemetry, use accounts, or read/copy/move/delete referenced file contents.
 
 Synthetic and headless tests verify inbound and outbound format mapping, live-transfer construction, precedence, order, atomic failures, safe UI status/rendering, and unchanged source paths and bytes. Real Windows/macOS host compatibility has not been manually tested: no real Explorer, Finder, browser, text-editor, COM, or AppKit drag was executed. See the [compatibility matrix](docs/drag-drop-compatibility.md); every manual result remains explicitly **Untested**.
+
+## Accessible shelf interaction (issue #4)
+
+Shelf cards expose type, a bounded safe display label, optional source hint, age, pinned/selected state, and file availability without displaying payload text, URL details, or full paths by default. Cards are focusable toggle controls with list-item automation metadata. Pointer or keyboard users can select one or many items, reorder the selected items as an ordered group, copy, open, reveal, pin, remove, clear, collapse, and expand. Ctrl+A selects all, Ctrl+C copies, Enter opens, Delete removes, P pins/unpins, Alt+Arrow reorders, and Escape collapses; all commands also have visible buttons, including Move up and Move down.
+
+The view-model owns deterministic focus targets after add, remove, clear, collapse, and expand, plus polite, path-free announcements. Copy/open/reveal cross explicit app-action boundaries; until issue #5 supplies native adapters, activating one produces a visible recoverable message and retains selection. The item region scrolls, text wraps, the toolbar wraps, controls have a 44-logical-pixel minimum target, state is never color-only, and no interaction uses animation. A geometry policy clamps expanded and collapsed bounds into the current monitor work area for every dock edge after resolution or topology changes.
+
+Loading, expired, unavailable, empty, and recoverable-error states have concise guidance, with a visible retry action for loading failures. Automated coverage and the keyboard-only/manual assistive-technology record are in the [accessibility checklist](docs/accessibility-checklist.md). Narrator and VoiceOver checks are explicitly marked unavailable because development occurred on Linux; no physical target-platform result is claimed.
 
 ## Contributing
 

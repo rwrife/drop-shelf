@@ -5,23 +5,71 @@
     xmlns:automation="clr-namespace:Avalonia.Automation;assembly=Avalonia.Controls"
     Title="Drop Shelf"
     Width="420"
-    Height="300"
-    MinWidth="320"
-    MinHeight="180"
+    Height="620"
+    MinWidth="44"
+    MinHeight="44"
     automation:AutomationProperties.Name="Drop Shelf">
-  <Border Padding="24">
-    <StackPanel Spacing="10">
-      <TextBlock FontSize="20" FontWeight="SemiBold" Text="Drop Shelf" />
-      <TextBlock
-          Name="EmptyShelfMessage"
-          Text="Drop files, text, or URLs here"
-          TextWrapping="Wrap" />
-      <StackPanel Name="ShelfItems" Spacing="6" />
-      <TextBlock
+  <Window.Styles>
+    <Style Selector="Button, ToggleButton">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="MinWidth" Value="44" />
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="ToggleButton.shelf-card">
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+  </Window.Styles>
+  <Grid Name="RootLayout" RowDefinitions="Auto,*">
+    <TextBlock Name="LiveStatus"
+               Grid.Row="0"
+               Width="1"
+               Height="1"
+               Opacity="0"
+               IsHitTestVisible="False"
+               automation:AutomationProperties.Name="Shelf status"
+               automation:AutomationProperties.LiveSetting="Polite" />
+    <Button Name="ExpandButton"
+            Grid.Row="0"
+            IsVisible="False"
+            Content="›"
+            automation:AutomationProperties.Name="Expand Drop Shelf" />
+    <Grid Name="ExpandedShelf" Grid.Row="1" Margin="16" RowDefinitions="Auto,Auto,*,Auto,Auto">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock FontSize="20" FontWeight="SemiBold" Text="Drop Shelf" VerticalAlignment="Center" />
+        <Button Name="CollapseButton" Grid.Column="1" Content="Collapse" automation:AutomationProperties.Name="Collapse shelf" />
+      </Grid>
+      <WrapPanel Grid.Row="1" Margin="0,8,0,8" Orientation="Horizontal">
+        <Button Name="MoveUpButton" Content="Move up" automation:AutomationProperties.Name="Move selected item earlier" />
+        <Button Name="MoveDownButton" Content="Move down" automation:AutomationProperties.Name="Move selected item later" />
+        <Button Name="CopyButton" Content="Copy" automation:AutomationProperties.Name="Copy selected items" />
+        <Button Name="OpenButton" Content="Open" automation:AutomationProperties.Name="Open selected items" />
+        <Button Name="RevealButton" Content="Reveal" automation:AutomationProperties.Name="Reveal selected items in folder" />
+        <Button Name="PinButton" Content="Pin" automation:AutomationProperties.Name="Pin or unpin selected items" />
+        <Button Name="RemoveButton" Content="Remove" automation:AutomationProperties.Name="Remove selected items" />
+        <Button Name="ClearButton" Content="Clear" automation:AutomationProperties.Name="Clear all shelf items" />
+      </WrapPanel>
+      <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+          <TextBlock Name="EmptyShelfMessage"
+              Text="Drop files, text, or URLs here"
+              Focusable="True"
+              automation:AutomationProperties.Name="Empty shelf drop surface"
+              TextWrapping="Wrap"
+              Margin="0,12" />
+          <StackPanel Name="ShelfItems" Spacing="0" automation:AutomationProperties.Name="Shelf items" />
+        </StackPanel>
+      </ScrollViewer>
+      <Grid Grid.Row="3" ColumnDefinitions="*,Auto">
+        <TextBlock Name="StateMessage" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,0" />
+        <Button Name="RetryButton" Grid.Column="1" Content="Try again" IsVisible="False" automation:AutomationProperties.Name="Try loading shelf items again" />
+      </Grid>
+      <TextBlock Grid.Row="4"
           Name="DropStatus"
-          automation:AutomationProperties.Name="Drop status"
+          automation:AutomationProperties.Name="Shelf status"
           Text="Ready for a drop."
-          TextWrapping="Wrap" />
-    </StackPanel>
-  </Border>
+          TextWrapping="Wrap"
+          Margin="0,8,0,0" />
+    </Grid>
+  </Grid>
 </Window>
