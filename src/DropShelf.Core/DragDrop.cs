@@ -45,7 +45,7 @@ public sealed class CanonicalDropConverter
                 return new(InboundDropFormat.Text, [CreateItem(UrlDisplayName(url.Url), url, createdAt, 0)]);
             }
             TextPayload text = TextPayload.Create(payload.Text);
-            return new(InboundDropFormat.Text, [CreateItem(TextDisplayName(text.Text), text, createdAt, 0)]);
+            return new(InboundDropFormat.Text, [CreateItem("Text", text, createdAt, 0)]);
         }
         throw Input.Error(ValidationErrorCode.Required, nameof(payload), "The drop did not contain files, a URL, or plain text.");
     }
@@ -61,11 +61,6 @@ public sealed class CanonicalDropConverter
     private static string UrlDisplayName(Uri url) => url.IsFile
         ? Path.GetFileName(url.LocalPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) is { Length: > 0 } name ? name : "File URL"
         : url.Host;
-    private static string TextDisplayName(string text)
-    {
-        string firstLine = text.Split('\n', 2)[0].Trim();
-        return firstLine.Length == 0 ? "Text" : firstLine[..Math.Min(firstLine.Length, 80)];
-    }
 }
 
 public sealed record DropAdmissionResult(bool Accepted, IReadOnlyList<ShelfItem> Items, string UserMessage)

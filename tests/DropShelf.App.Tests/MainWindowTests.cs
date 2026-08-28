@@ -1,6 +1,10 @@
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Automation;
+using Avalonia.Automation.Peers;
 using Avalonia.Headless.XUnit;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Xunit;
 
@@ -9,6 +13,8 @@ namespace DropShelf.App.Tests;
 public sealed class MainWindowTests
 {
     private static readonly DateTimeOffset Now = new(2026, 8, 27, 12, 0, 0, TimeSpan.Zero);
+    private static readonly string[] CommandButtonNames =
+        ["MoveUpButton", "MoveDownButton", "CopyButton", "OpenButton", "RevealButton", "PinButton", "RemoveButton", "ClearButton", "CollapseButton"];
 
     [AvaloniaFact]
     public void EmptyShelfWindowExposesClearInitialState()
@@ -38,11 +44,188 @@ public sealed class MainWindowTests
 
         Assert.True(result.Accepted);
         StackPanel items = window.FindControl<StackPanel>("ShelfItems")!;
-        TextBlock rendered = Assert.IsType<TextBlock>(Assert.Single(items.Children));
-        Assert.Contains("report.txt", rendered.Text, StringComparison.Ordinal);
-        Assert.DoesNotContain(path, rendered.Text ?? string.Empty, StringComparison.Ordinal);
+        ToggleButton rendered = Assert.IsType<ToggleButton>(Assert.Single(items.Children));
+        string renderedText = Assert.IsType<TextBlock>(rendered.Content).Text ?? string.Empty;
+        Assert.Contains("report.txt", renderedText, StringComparison.Ordinal);
+        Assert.DoesNotContain(path, renderedText, StringComparison.Ordinal);
         Assert.DoesNotContain(path, window.FindControl<TextBlock>("DropStatus")?.Text ?? string.Empty, StringComparison.Ordinal);
         Assert.Equal("Added 1 item.", window.FindControl<TextBlock>("DropStatus")?.Text);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void TextDropNeverRendersOrAnnouncesPayloadContentByDefault()
+    {
+        const string privateText = "quarterly password rotation notes";
+        MainWindow window = new();
+
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload(null, null, privateText), Now);
+
+        ToggleButton card = Assert.IsType<ToggleButton>(
+            Assert.Single(window.FindControl<StackPanel>("ShelfItems")!.Children));
+        string rendered = Assert.IsType<TextBlock>(card.Content).Text ?? string.Empty;
+        Assert.Contains("Text", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateText, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(privateText, AutomationProperties.GetName(card), StringComparison.Ordinal);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void InteractiveCardsAndCommandsExposeAccessibleWrappedState()
+    {
+        MainWindow window = new();
+        string path = Path.GetFullPath(Path.Combine("private", "report.txt"));
+
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload([path], null, null), Now);
+
+        StackPanel items = window.FindControl<StackPanel>("ShelfItems")!;
+        ToggleButton card = Assert.IsType<ToggleButton>(Assert.Single(items.Children));
+        Assert.Equal(AutomationControlType.ListItem, AutomationProperties.GetControlTypeOverride(card));
+        Assert.Contains("File, report.txt", AutomationProperties.GetName(card), StringComparison.Ordinal);
+        Assert.DoesNotContain(path, AutomationProperties.GetName(card), StringComparison.Ordinal);
+        Assert.Equal(1, AutomationProperties.GetPositionInSet(card));
+        Assert.Equal(1, AutomationProperties.GetSizeOfSet(card));
+        Assert.True(card.MinHeight >= 44);
+
+        Assert.Equal(AutomationLiveSetting.Polite,
+            AutomationProperties.GetLiveSetting(window.FindControl<TextBlock>("LiveStatus")!));
+        Assert.All(CommandButtonNames,
+            name => Assert.True(window.FindControl<Button>(name)?.IsVisible));
+        Assert.Equal("›", window.FindControl<Button>("ExpandButton")?.Content);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task StartupSettingsLoadIsAsynchronousAndAppliesThePersistedDockEdge()
+    {
+        Core.AppSettings expected = Core.AppSettings.Create(Core.DockEdge.Top);
+        TaskCompletionSource<Core.AppSettings> pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        MainWindow window = new();
+
+        Task load = App.LoadAndApplyStartupSettingsForHostAsync(window, new DeferredSettingsStore(pending.Task));
+
+        Assert.False(load.IsCompleted);
+        Assert.Equal("Loading shelf items…", window.FindControl<TextBlock>("StateMessage")?.Text);
+        pending.SetResult(expected);
+        await load;
+        ShelfBounds recovered = window.RecoverDockForHost(
+            new ShelfBounds(100, 100, 500, 600), new ShelfBounds(0, 0, 1200, 900));
+        Assert.Equal(0, recovered.Top);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void UsefulShelfStatesOfferVisibleRecoveryActions()
+    {
+        MainWindow window = new();
+
+        window.ShowShelfState(ShelfUiState.Loading);
+        Assert.Equal("Loading shelf items…", window.FindControl<TextBlock>("StateMessage")?.Text);
+        window.ShowShelfState(ShelfUiState.RecoverableError);
+        Assert.Equal("Shelf items could not be loaded.", window.FindControl<TextBlock>("StateMessage")?.Text);
+        Assert.True(window.FindControl<Button>("RetryButton")?.IsVisible);
+        Grid recoveryRow = Assert.IsType<Grid>(window.FindControl<TextBlock>("StateMessage")?.Parent);
+        Assert.Equal(2, recoveryRow.ColumnDefinitions.Count);
+        window.ShowShelfState(ShelfUiState.Unavailable);
+        Assert.Equal("Some source items are unavailable. Remove them or try again after reconnecting the source.",
+            window.FindControl<TextBlock>("StateMessage")?.Text);
+        window.ShowShelfState(ShelfUiState.Expired);
+        Assert.Equal("Expired items were removed according to your retention setting.",
+            window.FindControl<TextBlock>("StateMessage")?.Text);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void RetryActionTransitionsARecoverableStateBackToReady()
+    {
+        int attempts = 0;
+        MainWindow window = new(null, () =>
+        {
+            attempts++;
+            return Task.CompletedTask;
+        });
+        window.ShowShelfState(ShelfUiState.RecoverableError);
+
+        window.FindControl<Button>("RetryButton")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        Assert.Equal(1, attempts);
+        Assert.Equal(string.Empty, window.FindControl<TextBlock>("StateMessage")?.Text);
+        Assert.False(window.FindControl<Button>("RetryButton")?.IsVisible);
+        Assert.Equal("Shelf ready.", window.FindControl<TextBlock>("DropStatus")?.Text);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void PointerReorderAndRemoveCommandsRestoreActualCardFocus()
+    {
+        MainWindow window = new();
+        window.Show();
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload(null, null, "first"), Now);
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload(null, null, "second"), Now.AddSeconds(1));
+
+        Button moveUp = window.FindControl<Button>("MoveUpButton")!;
+        Assert.NotNull(moveUp);
+        moveUp.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Assert.Equal("second", Assert.IsType<Core.TextPayload>(window.Session.Items[0].Payload).Text);
+
+        Button remove = window.FindControl<Button>("RemoveButton")!;
+        remove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        ToggleButton survivor = Assert.IsType<ToggleButton>(
+            Assert.Single(window.FindControl<StackPanel>("ShelfItems")!.Children));
+        Assert.Equal("first", Assert.IsType<Core.TextPayload>(window.Session.Items[0].Payload).Text);
+        Assert.True(survivor.IsFocused);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void CollapseThenExpandRestoresUsableExpandedGeometry()
+    {
+        MainWindow window = new();
+        window.Show();
+        double expandedHeight = window.Height;
+
+        window.FindControl<Button>("CollapseButton")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Assert.True(window.Height <= ShelfGeometry.MinimumReachableSize);
+        Assert.Equal("Shelf collapsed. Expand button focused.", window.FindControl<TextBlock>("LiveStatus")?.Text);
+        Assert.True(window.FindControl<TextBlock>("LiveStatus")?.IsVisible);
+        window.FindControl<Button>("ExpandButton")!.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+        Assert.True(window.Height >= Math.Min(180, expandedHeight));
+        Assert.True(window.FindControl<Grid>("ExpandedShelf")!.IsVisible);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void ConfiguredDockEdgeAndLiveExpandedThicknessDriveRecovery()
+    {
+        MainWindow window = new(Core.AppSettings.Create(Core.DockEdge.Left));
+
+        ShelfBounds recovered = window.RecoverDockForHost(
+            new ShelfBounds(100, 100, 500, 600),
+            new ShelfBounds(0, 0, 1200, 900));
+
+        Assert.Equal(0, recovered.Left);
+        Assert.Equal(500, recovered.Width);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task FocusedCommandButtonsKeepEnterForTheirOwnActivation()
+    {
+        CountingActions actions = new();
+        MainWindow window = new(actions);
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload(null, null, "private"), Now);
+
+        bool commandHandled = await window.HandleShelfShortcutForHostAsync(Key.Enter, KeyModifiers.None, commandButtonFocused: true);
+        bool pinHandled = await window.HandleShelfShortcutForHostAsync(Key.P, KeyModifiers.None, commandButtonFocused: true);
+        bool cardHandled = await window.HandleShelfShortcutForHostAsync(Key.Enter, KeyModifiers.None, commandButtonFocused: false);
+
+        Assert.False(commandHandled);
+        Assert.True(pinHandled);
+        Assert.True(cardHandled);
+        Assert.True(window.Session.Items[0].IsPinned);
+        Assert.Equal(1, actions.OpenCount);
         window.Close();
     }
 
@@ -279,5 +462,27 @@ public sealed class MainWindowTests
         window.Close();
         file.Dispose();
         File.Delete(path);
+    }
+
+    private sealed class CountingActions : IShelfItemActions
+    {
+        public int OpenCount { get; private set; }
+        public Task CopyAsync(IReadOnlyList<Core.ShelfItem> items) => Task.CompletedTask;
+        public Task RevealAsync(IReadOnlyList<Core.ShelfItem> items) => Task.CompletedTask;
+
+        public Task OpenAsync(IReadOnlyList<Core.ShelfItem> items)
+        {
+            OpenCount++;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class DeferredSettingsStore(Task<Core.AppSettings> settings) : Core.ISettingsStore
+    {
+        public Task<Core.AppSettings> LoadSettingsAsync(CancellationToken cancellationToken = default) =>
+            settings;
+
+        public Task SaveSettingsAsync(Core.AppSettings value, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 }
