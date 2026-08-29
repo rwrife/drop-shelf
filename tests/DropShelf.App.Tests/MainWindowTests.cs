@@ -196,6 +196,13 @@ public sealed class MainWindowTests
         window.Close();
     }
 
+    [Fact]
+    public void TargetScreenScalingWinsOverStaleWindowScaling()
+    {
+        Assert.Equal(2, MainWindow.ResolveTargetScaleForHost(2, 1));
+        Assert.Equal(1.5, MainWindow.ResolveTargetScaleForHost(0, 1.5));
+    }
+
     [AvaloniaFact]
     public void ConfiguredDockEdgeAndLiveExpandedThicknessDriveRecovery()
     {

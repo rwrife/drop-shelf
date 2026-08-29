@@ -73,6 +73,12 @@ public sealed partial class MainWindow : Window
     private readonly Func<Task>? retryShelfLoad;
     private ShelfBounds? expandedBounds;
     private bool retryInProgress;
+    private ISettingsStore? nativeSettingsStore;
+    private INativeShell? nativeSettingsShell;
+    private AppSettings nativeSettings = AppSettings.Default;
+    private bool updatingNativeControls;
+    private bool nativeSettingsUpdateInProgress;
+    private bool recoveringDock;
 
     public MainWindow()
         : this(AppSettings.Default, null, null)
@@ -112,13 +118,169 @@ public sealed partial class MainWindow : Window
         this.FindControl<Button>("CollapseButton")!.Click += (_, _) => SetCollapsed(true);
         this.FindControl<Button>("ExpandButton")!.Click += (_, _) => SetCollapsed(false);
         this.FindControl<Button>("RetryButton")!.Click += OnRetryShelfLoad;
+        this.FindControl<ComboBox>("ShortcutPicker")!.ItemsSource = AppSettings.SupportedGlobalShortcuts;
+        this.FindControl<Button>("ApplyShortcutButton")!.Click += OnApplyShortcut;
+        this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsCheckedChanged += OnLaunchAtLoginChanged;
+
         Opened += OnWindowOpened;
+        PropertyChanged += OnWindowPropertyChanged;
         Closed += OnWindowClosed;
         Render("Ready for a drop.");
     }
 
     public ShelfSession Session { get; }
     public ShelfViewModel ViewModel { get; }
+
+    public void ConfigureNativeSettingsForHost(ISettingsStore settingsStore, INativeShell shell, AppSettings settings)
+    {
+        nativeSettingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
+        nativeSettingsShell = shell ?? throw new ArgumentNullException(nameof(shell));
+        nativeSettings = settings ?? throw new ArgumentNullException(nameof(settings));
+        updatingNativeControls = true;
+        this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem = settings.GlobalShortcut;
+        this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsChecked = settings.StartAtLogin;
+
+        updatingNativeControls = false;
+    }
+
+    private async void OnApplyShortcut(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (nativeSettingsUpdateInProgress || nativeSettingsShell is null || nativeSettingsStore is null ||
+            this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem is not string shortcut)
+        {
+            return;
+        }
+
+        nativeSettingsUpdateInProgress = true;
+        SetNativeSettingsControlsEnabled(false);
+        try
+        {
+            NativeShellStatus status = nativeSettingsShell.ConfigureShortcut(shortcut);
+            if (status != NativeShellStatus.Success)
+            {
+                this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem = nativeSettings.GlobalShortcut;
+                ShowNativeShellStatus(status);
+                return;
+            }
+
+            AppSettings changed = CopyNativeSettings(globalShortcut: shortcut);
+            try
+            {
+                await nativeSettingsStore.SaveSettingsAsync(changed);
+                nativeSettings = changed;
+                ShowNativeShellStatus(status);
+            }
+            catch
+            {
+                NativeShellStatus rollbackStatus = nativeSettingsShell.ConfigureShortcut(nativeSettings.GlobalShortcut);
+                this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem = nativeSettings.GlobalShortcut;
+                SetStatusText(rollbackStatus == NativeShellStatus.Success
+                    ? "Could not save the shortcut. Your previous setting was kept."
+                    : "Could not save the shortcut, and the previous native shortcut could not be restored. Review the shortcut setting before relying on it.");
+            }
+        }
+        finally
+        {
+            nativeSettingsUpdateInProgress = false;
+            SetNativeSettingsControlsEnabled(true);
+        }
+    }
+
+    private async void OnLaunchAtLoginChanged(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (updatingNativeControls || nativeSettingsShell is null || nativeSettingsStore is null)
+        {
+            return;
+        }
+
+        CheckBox toggle = this.FindControl<CheckBox>("LaunchAtLoginToggle")!;
+        if (nativeSettingsUpdateInProgress)
+        {
+            updatingNativeControls = true;
+            toggle.IsChecked = nativeSettings.StartAtLogin;
+            updatingNativeControls = false;
+            return;
+        }
+
+        bool requested = toggle.IsChecked == true;
+        nativeSettingsUpdateInProgress = true;
+        SetNativeSettingsControlsEnabled(false);
+        try
+        {
+            NativeShellStatus status = nativeSettingsShell.SetLaunchAtLogin(requested);
+            if (status != NativeShellStatus.Success)
+            {
+                updatingNativeControls = true;
+                toggle.IsChecked = nativeSettings.StartAtLogin;
+                updatingNativeControls = false;
+                SetStatusText("Could not change launch at login. Your previous setting was kept.");
+                return;
+            }
+
+            AppSettings changed = CopyNativeSettings(startAtLogin: requested);
+            try
+            {
+                await nativeSettingsStore.SaveSettingsAsync(changed);
+                nativeSettings = changed;
+                SetStatusText("Launch-at-login setting saved.");
+            }
+            catch
+            {
+                NativeShellStatus rollbackStatus = nativeSettingsShell.SetLaunchAtLogin(nativeSettings.StartAtLogin);
+                updatingNativeControls = true;
+                toggle.IsChecked = nativeSettings.StartAtLogin;
+                updatingNativeControls = false;
+                SetStatusText(rollbackStatus == NativeShellStatus.Success
+                    ? "Could not change launch at login. Your previous setting was kept."
+                    : "Could not save launch at login, and the previous native setting could not be restored. Review the login setting before relying on it.");
+            }
+        }
+        finally
+        {
+            nativeSettingsUpdateInProgress = false;
+            SetNativeSettingsControlsEnabled(true);
+        }
+    }
+
+    private void SetNativeSettingsControlsEnabled(bool enabled)
+    {
+        this.FindControl<ComboBox>("ShortcutPicker")!.IsEnabled = enabled;
+        this.FindControl<Button>("ApplyShortcutButton")!.IsEnabled = enabled;
+        this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsEnabled = enabled;
+    }
+
+
+    private AppSettings CopyNativeSettings(bool? startAtLogin = null, string? globalShortcut = null) =>
+        AppSettings.Create(nativeSettings.DockEdge, nativeSettings.Retention, startAtLogin ?? nativeSettings.StartAtLogin,
+            nativeSettings.ReduceMotion, nativeSettings.HighContrast, globalShortcut ?? nativeSettings.GlobalShortcut);
+
+    public void ToggleVisibilityForHost()
+    {
+        if (IsVisible)
+        {
+            Hide();
+        }
+        else
+        {
+            Show();
+            Activate();
+        }
+    }
+
+    public void ShowNativeShellStatus(NativeShellStatus status)
+    {
+        string message = status switch
+        {
+            NativeShellStatus.Success => "Global shortcut ready.",
+            NativeShellStatus.Conflict => "That shortcut is already in use. Use the tray or menu to open the shelf.",
+            NativeShellStatus.PermissionDenied => "Global shortcut permission was denied. The shelf and tray or menu remain available.",
+            NativeShellStatus.Unavailable => "Global shortcut is unavailable. Use the tray or menu to open the shelf.",
+            NativeShellStatus.InvalidTarget => "That shortcut is not valid. Use the tray or menu to open the shelf.",
+            NativeShellStatus.TargetMissing or NativeShellStatus.Failed => "Global shortcut could not be enabled. Use the tray or menu to open the shelf.",
+            _ => throw new ArgumentOutOfRangeException(nameof(status)),
+        };
+        SetStatusText(message);
+    }
 
     public void ApplySettings(AppSettings settings)
     {
@@ -481,7 +643,11 @@ public sealed partial class MainWindow : Window
                 throw new InvalidOperationException("No shelf-load retry action is configured.");
             }
             await retryShelfLoad();
-            ShowShelfState(ShelfUiState.Ready);
+            if (string.Equals(this.FindControl<TextBlock>("StateMessage")!.Text,
+                "Loading shelf items…", StringComparison.Ordinal))
+            {
+                ShowShelfState(ShelfUiState.Ready);
+            }
             RestoreViewModelFocus();
         }
         catch
@@ -636,29 +802,52 @@ public sealed partial class MainWindow : Window
 
     private void OnScreensChanged(object? sender, EventArgs eventArgs) => RecoverDockToCurrentScreen();
 
+    private void OnWindowPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs eventArgs)
+    {
+        if (string.Equals(eventArgs.Property.Name, nameof(RenderScaling), StringComparison.Ordinal))
+        {
+            RecoverDockToCurrentScreen();
+        }
+    }
+
+    public static double ResolveTargetScaleForHost(double selectedScreenScaling, double windowScaling) =>
+        selectedScreenScaling > 0 ? selectedScreenScaling : windowScaling > 0 ? windowScaling : 1;
+
     public ShelfBounds RecoverDockForHost(ShelfBounds current, ShelfBounds workArea, double renderScaling = 1) =>
         RecoverDock(current, workArea, previousOverride: null, renderScaling);
 
     private void RecoverDockToCurrentScreen(ShelfBounds? previousOverride = null)
     {
-        Screens? screens = activeScreens;
-        if (screens is null)
+        if (recoveringDock)
         {
             return;
         }
-        Screen? screen = screens.ScreenFromWindow(this) ?? screens.Primary;
-        if (screen is null)
+        recoveringDock = true;
+        try
         {
-            return;
+            Screens? screens = activeScreens;
+            if (screens is null)
+            {
+                return;
+            }
+            Screen? screen = screens.ScreenFromWindow(this) ?? screens.Primary;
+            if (screen is null)
+            {
+                return;
+            }
+            PixelRect work = screen.WorkingArea;
+            double scale = ResolveTargetScaleForHost(screen.Scaling, RenderScaling);
+            ShelfBounds current = CurrentBounds(scale);
+            ShelfBounds recovered = RecoverDock(
+                current, new ShelfBounds(work.X, work.Y, work.Width, work.Height), previousOverride, scale);
+            Position = new PixelPoint(recovered.Left, recovered.Top);
+            Width = recovered.Width / scale;
+            Height = recovered.Height / scale;
         }
-        PixelRect work = screen.WorkingArea;
-        double scale = RenderScaling <= 0 ? 1 : RenderScaling;
-        ShelfBounds current = CurrentBounds();
-        ShelfBounds recovered = RecoverDock(
-            current, new ShelfBounds(work.X, work.Y, work.Width, work.Height), previousOverride, scale);
-        Position = new PixelPoint(recovered.Left, recovered.Top);
-        Width = recovered.Width / scale;
-        Height = recovered.Height / scale;
+        finally
+        {
+            recoveringDock = false;
+        }
     }
 
     private ShelfBounds RecoverDock(
@@ -673,9 +862,9 @@ public sealed partial class MainWindow : Window
         return recovered;
     }
 
-    private ShelfBounds CurrentBounds()
+    private ShelfBounds CurrentBounds(double? scaleOverride = null)
     {
-        double scale = RenderScaling <= 0 ? 1 : RenderScaling;
+        double scale = scaleOverride ?? (RenderScaling <= 0 ? 1 : RenderScaling);
         PixelSize size = PixelSize.FromSize(ClientSize, scale);
         return new ShelfBounds(Position.X, Position.Y, size.Width, size.Height);
     }
