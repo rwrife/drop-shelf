@@ -62,8 +62,8 @@ File items are references to their original paths by default; Drop Shelf does no
 - **Offline by default:** no telemetry, account, remote API, or network listener.
 - **Explicit collection:** only items the user drops or explicitly pastes into the shelf are recorded; the app does not monitor clipboard history.
 - **File behavior:** original paths and display metadata are stored locally. Files are not copied or moved unless a future managed-copy command is explicitly chosen.
-- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store, atomic writes, and transactional creation of the version 1 schema.
-- **Permissions:** macOS may require Accessibility permission only for an optional global shortcut implementation if the selected native API requires it; basic drag/drop remains useful without that permission. Windows needs no administrator access. Drop Shelf will explain permission purpose before opening OS settings.
+- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store, atomic writes, transactional creation of schema version 2, and a transactional migration from schema version 1.
+- **Permissions:** the selected Windows `RegisterHotKey` and macOS Carbon `RegisterEventHotKey` implementations do not require administrator/root or macOS Accessibility access. Drop Shelf does not direct users to broad Accessibility settings for this shortcut backend.
 - **Cleanup:** unpinned items expire by policy, users can clear all metadata immediately, and uninstall documentation identifies the app-data directory.
 - **Export:** users can export settings and shelf metadata to a documented JSON format. Exported file references do not include file contents.
 
@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Accessible shelf interaction implemented; native desktop integration and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence, versioned JSON metadata export, an Avalonia docked shelf with inbound/outbound drag wiring, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, and architecture-boundary tests. Native copy/open/reveal integration remains behind explicit injectable failure-reporting boundaries for issue #5. No installer or signed/notarized package is claimed yet.
+**Accessible shelf interaction and native-shell policy/composition are implemented; target-host verification and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence with v1-to-v2 migration, schema-v1 JSON metadata export, an Avalonia docked shelf with inbound/outbound drag wiring, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, native open/reveal actions, tray/menu composition, login policy, and architecture-boundary tests. No installer or signed/notarized package is claimed yet.
 
 ## Core domain and local store
 
@@ -81,9 +81,9 @@ The canonical `ShelfItem` supports three explicit payloads: a file/directory ref
 
 Inputs are treated as untrusted. Text is newline-normalized and limited to 65,536 characters; display/source labels, paths, URLs, item counts, and exports also have explicit limits. Validation failures carry a typed error code and field. URL credentials, malformed URLs, and schemes other than HTTP(S)/file are rejected. File items persist only their original qualified path and optional kind/size/modified/availability metadata. Core exposes no copy, move, delete, open, networking, telemetry, account, or clipboard-monitoring service.
 
-`SqliteShelfStore` stores the complete session and settings in a local SQLite database using atomic transactions. Schema version 1 is created on first use. A future schema fails explicitly; malformed databases or invalid/inconsistent rows fail the complete load and never return a partial shelf. The store does not access or mutate referenced source files.
+`SqliteShelfStore` stores the complete session and settings in a local SQLite database using atomic transactions. SQLite schema version 2 is created on first use; valid schema-v1 databases migrate transactionally with the default shortcut and retain their shelf items and settings. A future schema fails explicitly; malformed databases or invalid/inconsistent rows fail the complete load and never return a partial shelf. The store does not access or mutate referenced source files.
 
-Default settings are: right dock edge, 24-hour retention, start-at-login off, reduced motion off, and high contrast off. Retention is configurable from one minute through 30 days. Settings may be persisted independently in one SQLite transaction without replacing shelf items.
+Default settings are: right dock edge, 24-hour retention, start-at-login off, reduced motion off, high contrast off, and global shortcut Ctrl+Alt+Space. The in-app Settings section offers four bounded shortcut choices and an explicit launch-at-login toggle. Retention is configurable from one minute through 30 days. Settings may be persisted independently in one SQLite transaction without replacing shelf items.
 
 ## JSON metadata export schema
 
@@ -104,7 +104,7 @@ Metadata export is UTF-8 JSON with a maximum encoded size of 16 MiB and schema v
 }
 ```
 
-Each item contains its common metadata and only the fields for its declared kind: `text` for text; `url` and optional `title` for URLs; or `path`, `fileKind`, optional `sizeBytes`/`modifiedAt`, and `availability` for file references. Other kind-specific fields are null. Import re-runs all domain limits and kind consistency checks, rejects unknown or duplicate members and unknown schema versions, requires `exportedAt`, and is capped at 1,000 items. File bytes are never read, embedded, or exported. Exports can contain sensitive text and full local paths, so they should be protected like the source metadata.
+Each item contains its common metadata and only the fields for its declared kind: `text` for text; `url` and optional `title` for URLs; or `path`, `fileKind`, optional `sizeBytes`/`modifiedAt`, and `availability` for file references. Other kind-specific fields are null. Import re-runs all domain limits and kind consistency checks, rejects unknown or duplicate members and unknown schema versions, requires `exportedAt`, and is capped at 1,000 items. File bytes are never read, embedded, or exported. Schema version 1 predates the global-shortcut setting, so exports omit it and imports retain the safe default shortcut. Exports can contain sensitive text and full local paths, so they should be protected like the source metadata.
 
 ### Milestones
 
@@ -165,9 +165,19 @@ Synthetic and headless tests verify inbound and outbound format mapping, live-tr
 
 Shelf cards expose type, a bounded safe display label, optional source hint, age, pinned/selected state, and file availability without displaying payload text, URL details, or full paths by default. Cards are focusable toggle controls with list-item automation metadata. Pointer or keyboard users can select one or many items, reorder the selected items as an ordered group, copy, open, reveal, pin, remove, clear, collapse, and expand. Ctrl+A selects all, Ctrl+C copies, Enter opens, Delete removes, P pins/unpins, Alt+Arrow reorders, and Escape collapses; all commands also have visible buttons, including Move up and Move down.
 
-The view-model owns deterministic focus targets after add, remove, clear, collapse, and expand, plus polite, path-free announcements. Copy/open/reveal cross explicit app-action boundaries; until issue #5 supplies native adapters, activating one produces a visible recoverable message and retains selection. The item region scrolls, text wraps, the toolbar wraps, controls have a 44-logical-pixel minimum target, state is never color-only, and no interaction uses animation. A geometry policy clamps expanded and collapsed bounds into the current monitor work area for every dock edge after resolution or topology changes.
+The view-model owns deterministic focus targets after add, remove, clear, collapse, and expand, plus polite, path-free announcements. Copy/open/reveal cross explicit app-action boundaries; open and reveal use validated native adapters, while copy remains an explicit recoverable unavailable action. Failed actions retain selection and do not expose payloads or full paths. The item region scrolls, text wraps, the toolbar wraps, controls have a 44-logical-pixel minimum target, state is never color-only, and no interaction uses animation. A geometry policy clamps expanded and collapsed bounds into the current monitor work area for every dock edge after resolution or topology changes.
 
 Loading, expired, unavailable, empty, and recoverable-error states have concise guidance, with a visible retry action for loading failures. Automated coverage and the keyboard-only/manual assistive-technology record are in the [accessibility checklist](docs/accessibility-checklist.md). Narrator and VoiceOver checks are explicitly marked unavailable because development occurred on Linux; no physical target-platform result is claimed.
+
+## Native shell integration (issue #5)
+
+Application composition installs a persistent Avalonia `TrayIcon`/native menu with show-or-hide and quit commands before attempting the persisted optional global shortcut. The visible in-app Settings section exposes a bounded shortcut picker/apply command and an explicit launch-at-login toggle. Shortcut conflict or an unavailable backend does not close the window, disable drag/drop, or remove tray/menu access. Reconfiguration registers a replacement before releasing the prior shortcut. The selected native shortcut APIs require neither administrator/root elevation nor macOS Accessibility access, so the application does not prompt users to grant that broad permission.
+
+Windows uses `RegisterHotKey`/`UnregisterHotKey` on a contained message thread; `WM_HOTKEY` dispatches reveal/hide back to Avalonia's UI thread. Open uses shell execution and reveal uses `explorer.exe /select,` with separate argument-list values. Launch at login is opt-in and reversible through the current user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value; it installs no service. macOS uses Carbon `RegisterEventHotKey` and an application event handler, `/usr/bin/open`/`open -R` for open/reveal, and `SMAppService.mainAppService` for reversible login registration without a helper service. Tray/menu behavior uses Avalonia's documented `TrayIcon` abstraction over the Windows notification area and macOS status item.
+
+Open and reveal accept only qualified local paths or absolute HTTP(S)/file URLs without credentials. File targets are checked immediately before dispatch. Missing or malformed targets produce a visible generic message containing neither the full path, URL, nor private payload text. Source files are never copied, moved, deleted, or modified. Startup restores the recorded toggle state but does not mutate OS login registration; only deliberate toggle interaction calls the native adapter, and only successful native changes are persisted. Failure restores the prior control/recorded state with a generic message. Native errors remain recoverable optional-capability failures.
+
+Monitor recovery reacts to screen-topology and render-scale changes, uses the selected target screen's scale instead of stale window scale, and guards against recursive repositioning. Topology changes re-dock and clamp expanded or collapsed bounds into a reachable work area after disconnected displays, mixed DPI/scaling, and invalid restored coordinates. Linux tests cover geometry, adapter mapping, target validation, transactional shortcut replacement, permission gating, and host orchestration. No Windows/macOS manual execution is claimed; the [native shell compatibility matrix](docs/native-shell-compatibility.md) marks target-host results **Untested**.
 
 ## Contributing
 

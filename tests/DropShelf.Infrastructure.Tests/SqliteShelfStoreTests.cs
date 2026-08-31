@@ -92,6 +92,43 @@ public sealed class SqliteShelfStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task VersionOneDatabaseMigratesShortcutSettingWithoutLosingItems()
+    {
+        _ = Directory.CreateDirectory(directory);
+        Guid itemId = Guid.NewGuid();
+        await using (SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False"))
+        {
+            await connection.OpenAsync();
+            await using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE shelf_items (
+                  id TEXT NOT NULL PRIMARY KEY, kind INTEGER NOT NULL, display_name TEXT NOT NULL, source_hint TEXT NULL,
+                  created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, is_pinned INTEGER NOT NULL, ordinal INTEGER NOT NULL UNIQUE,
+                  text_value TEXT NULL, url_value TEXT NULL, title TEXT NULL, path_value TEXT NULL, file_kind INTEGER NULL,
+                  size_bytes INTEGER NULL, modified_at TEXT NULL, availability INTEGER NULL);
+                CREATE TABLE app_settings (
+                  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
+                  start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL);
+                INSERT INTO app_settings VALUES(1,1,86400,0,0,0);
+                INSERT INTO shelf_items(id,kind,display_name,created_at,last_used_at,is_pinned,ordinal,text_value)
+                  VALUES($id,1,'note','1970-01-01T00:00:00.0000000+00:00','1970-01-01T00:00:00.0000000+00:00',0,0,'hello');
+                PRAGMA user_version=1;
+                """;
+            _ = command.Parameters.AddWithValue("$id", itemId.ToString("D"));
+            _ = await command.ExecuteNonQueryAsync();
+        }
+
+        AppSettings migrated = (await new SqliteShelfStore(DatabasePath).LoadAsync()).Settings;
+        Assert.Equal("Ctrl+Alt+Space", migrated.GlobalShortcut);
+
+        AppSettings changed = AppSettings.Create(globalShortcut: "Ctrl+Shift+Space");
+        await new SqliteShelfStore(DatabasePath).SaveSettingsAsync(changed);
+        StoreSnapshot reopened = await new SqliteShelfStore(DatabasePath).LoadAsync();
+        Assert.Equal("Ctrl+Shift+Space", reopened.Settings.GlobalShortcut);
+        Assert.Equal(itemId, reopened.Items.Single().Id);
+    }
+
+    [Fact]
     public async Task CurrentVersionDatabaseWithMalformedShapeIsRejected()
     {
         _ = Directory.CreateDirectory(directory);

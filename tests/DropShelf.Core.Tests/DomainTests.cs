@@ -73,6 +73,7 @@ public sealed class DomainTests
         Assert.DoesNotContain("fileContents", text, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(path, ((FileReferencePayload)imported.Items.Single().Payload).Path);
         Assert.Equal(TimeSpan.FromDays(2), imported.Settings.Retention);
+        Assert.Equal(AppSettings.DefaultGlobalShortcut, imported.Settings.GlobalShortcut);
         Assert.Equal(ValidationErrorCode.InvalidExport, Assert.Throws<ShelfValidationException>(() => service.Import("{}"u8)).Code);
         Assert.Equal(ValidationErrorCode.InvalidExport, Assert.Throws<ShelfValidationException>(() => service.Import(new byte[DomainLimits.MaxExportBytes + 1])).Code);
     }

@@ -12,7 +12,7 @@ public sealed class ShelfStoreException(StoreErrorCode code, string message, Exc
 
 public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     private readonly string connectionString;
     private readonly Func<int, CancellationToken, ValueTask>? beforeInsert;
 
@@ -113,7 +113,18 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
 
         if (version == CurrentSchemaVersion)
         {
-            await ValidateSchemaShapeAsync(connection, token);
+            await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
+            return;
+        }
+
+        if (version == 1)
+        {
+            await ValidateSchemaShapeAsync(connection, includeShortcut: false, token);
+            await using SqliteTransaction migration = (SqliteTransaction)await connection.BeginTransactionAsync(token);
+            await ExecuteAsync(connection, migration,
+                "ALTER TABLE app_settings ADD COLUMN global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space'; PRAGMA user_version = 2;", token);
+            await migration.CommitAsync(token);
+            await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
             return;
         }
 
@@ -140,16 +151,17 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
               size_bytes INTEGER NULL, modified_at TEXT NULL, availability INTEGER NULL);
             CREATE TABLE app_settings (
               singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
-              start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL);
-            PRAGMA user_version = 1;
+              start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
+              global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space');
+            PRAGMA user_version = 2;
             """;
         await ExecuteAsync(connection, transaction, sql, token);
         await WriteSettingsAsync(connection, transaction, AppSettings.Default, token);
         await transaction.CommitAsync(token);
-        await ValidateSchemaShapeAsync(connection, token);
+        await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
     }
 
-    private static async Task ValidateSchemaShapeAsync(SqliteConnection connection, CancellationToken token)
+    private static async Task ValidateSchemaShapeAsync(SqliteConnection connection, bool includeShortcut, CancellationToken token)
     {
         Dictionary<string, string> expected = new(StringComparer.Ordinal)
         {
@@ -160,7 +172,12 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
                   text_value TEXT NULL, url_value TEXT NULL, title TEXT NULL, path_value TEXT NULL, file_kind INTEGER NULL,
                   size_bytes INTEGER NULL, modified_at TEXT NULL, availability INTEGER NULL)
                 """,
-            ["app_settings"] = """
+            ["app_settings"] = includeShortcut ? """
+                CREATE TABLE app_settings (
+                  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
+                  start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
+                  global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space')
+                """ : """
                 CREATE TABLE app_settings (
                   singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
                   start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL)
@@ -236,11 +253,11 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast FROM app_settings WHERE singleton=1;";
+        command.CommandText = "SELECT dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut FROM app_settings WHERE singleton=1;";
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(token);
         return !await reader.ReadAsync(token)
             ? throw new ShelfStoreException(StoreErrorCode.CorruptData, "Stored settings are missing.")
-            : AppSettings.Create(CheckedEnum<DockEdge>(ReadInt32(reader, 0)), TimeSpan.FromSeconds(ReadInt64(reader, 1)), ReadBoolean(reader, 2), ReadBoolean(reader, 3), ReadBoolean(reader, 4));
+            : AppSettings.Create(CheckedEnum<DockEdge>(ReadInt32(reader, 0)), TimeSpan.FromSeconds(ReadInt64(reader, 1)), ReadBoolean(reader, 2), ReadBoolean(reader, 3), ReadBoolean(reader, 4), reader.GetString(5));
     }
 
     private static async Task InsertItemAsync(SqliteConnection connection, SqliteTransaction transaction, ShelfItem item, CancellationToken token)
@@ -271,9 +288,10 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "INSERT INTO app_settings VALUES(1,$edge,$retention,$startup,$motion,$contrast) ON CONFLICT(singleton) DO UPDATE SET dock_edge=$edge,retention_seconds=$retention,start_at_login=$startup,reduce_motion=$motion,high_contrast=$contrast;";
+        command.CommandText = "INSERT INTO app_settings(singleton,dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut) VALUES(1,$edge,$retention,$startup,$motion,$contrast,$shortcut) ON CONFLICT(singleton) DO UPDATE SET dock_edge=$edge,retention_seconds=$retention,start_at_login=$startup,reduce_motion=$motion,high_contrast=$contrast,global_shortcut=$shortcut;";
         Add(command, "$edge", (int)settings.DockEdge); Add(command, "$retention", checked((long)settings.Retention.TotalSeconds));
         Add(command, "$startup", settings.StartAtLogin); Add(command, "$motion", settings.ReduceMotion); Add(command, "$contrast", settings.HighContrast);
+        Add(command, "$shortcut", settings.GlobalShortcut);
         _ = await command.ExecuteNonQueryAsync(token);
     }
 
