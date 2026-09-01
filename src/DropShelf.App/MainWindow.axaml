@@ -47,14 +47,27 @@
         <Button Name="RevealButton" Content="Reveal" automation:AutomationProperties.Name="Reveal selected items in folder" />
         <Button Name="PinButton" Content="Pin" automation:AutomationProperties.Name="Pin or unpin selected items" />
         <Button Name="RemoveButton" Content="Remove" automation:AutomationProperties.Name="Remove selected items" />
-        <Button Name="ClearButton" Content="Clear" automation:AutomationProperties.Name="Clear all shelf items" />
+        <Button Name="ClearButton" Content="Clear all metadata" automation:AutomationProperties.Name="Clear all local shelf metadata and settings" />
       </WrapPanel>
       <StackPanel Grid.Row="2" Spacing="6" Margin="0,0,0,8">
         <TextBlock Text="Settings" FontWeight="SemiBold" />
+        <TextBlock Name="StorageDisclosure"
+                   Text="Unpinned items are stored for 24 hours by default in %LOCALAPPDATA%/DropShelf on Windows or ~/Library/Application Support/DropShelf on macOS. Exports contain metadata, paths, and explicit text, but never file contents."
+                   TextWrapping="Wrap" />
         <WrapPanel Orientation="Horizontal">
           <ComboBox Name="ShortcutPicker" MinWidth="180" automation:AutomationProperties.Name="Global shortcut" />
           <Button Name="ApplyShortcutButton" Content="Apply shortcut" automation:AutomationProperties.Name="Apply global shortcut" />
           <CheckBox Name="LaunchAtLoginToggle" Content="Launch at login" automation:AutomationProperties.Name="Launch Drop Shelf at login" />
+        </WrapPanel>
+        <WrapPanel Orientation="Horizontal">
+          <ComboBox Name="RetentionPicker" MinWidth="180" automation:AutomationProperties.Name="Unpinned item retention policy" />
+          <Button Name="ApplyRetentionButton" Content="Apply retention" automation:AutomationProperties.Name="Apply retention policy" />
+        </WrapPanel>
+        <TextBlock Name="RetentionPreview" Text="Changing retention currently affects 0 items." TextWrapping="Wrap" />
+        <WrapPanel Orientation="Horizontal">
+          <Button Name="ClearUnpinnedButton" Content="Clear unpinned" automation:AutomationProperties.Name="Clear all unpinned shelf metadata" />
+          <Button Name="ExportButton" Content="Export metadata" automation:AutomationProperties.Name="Export shelf metadata" />
+          <Button Name="ImportButton" Content="Import metadata" automation:AutomationProperties.Name="Import shelf metadata" />
         </WrapPanel>
       </StackPanel>
       <ScrollViewer Grid.Row="3" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
@@ -70,7 +83,10 @@
       </ScrollViewer>
       <Grid Grid.Row="4" ColumnDefinitions="*,Auto">
         <TextBlock Name="StateMessage" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,8,0" />
-        <Button Name="RetryButton" Grid.Column="1" Content="Try again" IsVisible="False" automation:AutomationProperties.Name="Try loading shelf items again" />
+        <StackPanel Grid.Column="1" Orientation="Horizontal">
+          <Button Name="RetryButton" Content="Try again" IsVisible="False" automation:AutomationProperties.Name="Try loading shelf items again" />
+          <Button Name="ResetLocalDataButton" Content="Reset local data" IsVisible="False" automation:AutomationProperties.Name="Reset corrupt local shelf metadata" />
+        </StackPanel>
       </Grid>
       <TextBlock Grid.Row="5"
           Name="DropStatus"

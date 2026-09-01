@@ -62,7 +62,7 @@ File items are references to their original paths by default; Drop Shelf does no
 - **Offline by default:** no telemetry, account, remote API, or network listener.
 - **Explicit collection:** only items the user drops or explicitly pastes into the shelf are recorded; the app does not monitor clipboard history.
 - **File behavior:** original paths and display metadata are stored locally. Files are not copied or moved unless a future managed-copy command is explicitly chosen.
-- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store, atomic writes, transactional creation of schema version 2, and a transactional migration from schema version 1.
+- **Local data:** settings and shelf metadata live under `%LOCALAPPDATA%/DropShelf` on Windows and `~/Library/Application Support/DropShelf` on macOS. The architecture uses a versioned store, atomic writes, transactional creation of schema version 3, and transactional migrations from schema versions 1 and 2.
 - **Permissions:** the selected Windows `RegisterHotKey` and macOS Carbon `RegisterEventHotKey` implementations do not require administrator/root or macOS Accessibility access. Drop Shelf does not direct users to broad Accessibility settings for this shortcut backend.
 - **Cleanup:** unpinned items expire by policy, users can clear all metadata immediately, and uninstall documentation identifies the app-data directory.
 - **Export:** users can export settings and shelf metadata to a documented JSON format. Exported file references do not include file contents.
@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Accessible shelf interaction and native-shell policy/composition are implemented; target-host verification and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence with v1-to-v2 migration, schema-v1 JSON metadata export, an Avalonia docked shelf with inbound/outbound drag wiring, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, native open/reveal actions, tray/menu composition, login policy, and architecture-boundary tests. No installer or signed/notarized package is claimed yet.
+**Privacy/resilience controls and native-shell policy/composition are implemented; target-host verification and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence with v1-to-v3 migration, schema-v2 JSON metadata export with schema-v1 import compatibility, an Avalonia docked shelf with inbound/outbound drag wiring, explicit retention/clear/export/import/recovery controls, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, native open/reveal actions, tray/menu composition, login policy, and architecture-boundary tests. No installer or signed/notarized package is claimed yet.
 
 ## Core domain and local store
 
@@ -81,30 +81,49 @@ The canonical `ShelfItem` supports three explicit payloads: a file/directory ref
 
 Inputs are treated as untrusted. Text is newline-normalized and limited to 65,536 characters; display/source labels, paths, URLs, item counts, and exports also have explicit limits. Validation failures carry a typed error code and field. URL credentials, malformed URLs, and schemes other than HTTP(S)/file are rejected. File items persist only their original qualified path and optional kind/size/modified/availability metadata. Core exposes no copy, move, delete, open, networking, telemetry, account, or clipboard-monitoring service.
 
-`SqliteShelfStore` stores the complete session and settings in a local SQLite database using atomic transactions. SQLite schema version 2 is created on first use; valid schema-v1 databases migrate transactionally with the default shortcut and retain their shelf items and settings. A future schema fails explicitly; malformed databases or invalid/inconsistent rows fail the complete load and never return a partial shelf. The store does not access or mutate referenced source files.
+`SqliteShelfStore` stores the complete session and settings in a local SQLite database using atomic transactions. SQLite schema version 3 is created on first use; valid schema-v1/v2 databases migrate transactionally with safe shortcut and exit-policy defaults while retaining shelf items and settings. A future schema fails explicitly; malformed databases or invalid/inconsistent rows fail the complete load and never return a partial shelf. The store does not access or mutate referenced source files.
 
-Default settings are: right dock edge, 24-hour retention, start-at-login off, reduced motion off, high contrast off, and global shortcut Ctrl+Alt+Space. The in-app Settings section offers four bounded shortcut choices and an explicit launch-at-login toggle. Retention is configurable from one minute through 30 days. Settings may be persisted independently in one SQLite transaction without replacing shelf items.
+Default settings are: right dock edge, 24-hour retention, expire-on-exit off, start-at-login off, reduced motion off, high contrast off, and global shortcut Ctrl+Alt+Space. The in-app Settings section offers bounded retention and shortcut choices plus explicit expire-on-exit and launch-at-login behavior. Pinned items never expire implicitly. Settings may be persisted independently in one SQLite transaction without replacing shelf items.
 
 ## JSON metadata export schema
 
-Metadata export is UTF-8 JSON with a maximum encoded size of 16 MiB and schema version `1`:
+Metadata export is UTF-8 JSON with a maximum encoded size of 16 MiB and schema version `2`:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "exportedAt": "2026-01-02T03:04:05+00:00",
   "settings": {
     "dockEdge": "right",
     "retentionSeconds": 86400,
     "startAtLogin": false,
     "reduceMotion": false,
-    "highContrast": false
+    "highContrast": false,
+    "globalShortcut": "Ctrl+Alt+Space",
+    "expireOnExit": false
   },
   "items": []
 }
 ```
 
-Each item contains its common metadata and only the fields for its declared kind: `text` for text; `url` and optional `title` for URLs; or `path`, `fileKind`, optional `sizeBytes`/`modifiedAt`, and `availability` for file references. Other kind-specific fields are null. Import re-runs all domain limits and kind consistency checks, rejects unknown or duplicate members and unknown schema versions, requires `exportedAt`, and is capped at 1,000 items. File bytes are never read, embedded, or exported. Schema version 1 predates the global-shortcut setting, so exports omit it and imports retain the safe default shortcut. Exports can contain sensitive text and full local paths, so they should be protected like the source metadata.
+Each item contains its common metadata and only the fields for its declared kind: `text` for text; `url` and optional `title` for URLs; or `path`, `fileKind`, optional `sizeBytes`/`modifiedAt`, and `availability` for file references. Other kind-specific fields are null. Import re-runs all domain limits and kind consistency checks, rejects unknown or duplicate members and unknown/future schema versions, requires `exportedAt`, and is capped at 1,000 items and 16 MiB. The complete import is validated and committed transactionally before the visible shelf changes. File bytes are never read, embedded, or exported. Schema version 1 remains importable with safe default shortcut and exit-policy values. Exports can contain sensitive text and full local paths, so they should be protected like the source metadata.
+
+## Privacy behavior and recovery
+
+| User action or event | Local metadata behavior | Source-file behavior |
+|---|---|---|
+| Explicit drop/import | Stores validated shelf metadata only after complete validation | Never reads, copies, moves, deletes, or modifies source file contents |
+| Duration retention | Removes only unpinned metadata at or before the selected age boundary | No source-file operation |
+| Expire on app exit | Removes all unpinned metadata on a normal app exit; pinned metadata remains | No source-file operation |
+| Clear unpinned | Immediately and transactionally removes unpinned metadata | No source-file operation |
+| Clear all metadata | Immediately clears shelf metadata, restores default settings, and clears only the app-owned cache | No source-file operation |
+| JSON export | Writes settings and shelf metadata, including explicit text and full paths; excludes file contents | Does not open referenced source files |
+| JSON import failure | Keeps the current shelf unchanged and shows a generic, payload-free error | No source-file operation |
+| Corrupt/incompatible store | Shows retry and explicit reset controls; reset deletes only Drop Shelf's database/cache | No source-file operation |
+
+The app writes no telemetry or diagnostics log. User-facing failures use bounded generic messages and do not include payload text, URLs, or full paths. The reserved app-owned metadata cache is limited to 256 entries and 32 MiB; cleanup keeps newest entries deterministically and never traverses outside the cache directory. Current builds do not cache source-file contents.
+
+To remove all app-owned data manually after quitting Drop Shelf, delete `%LOCALAPPDATA%/DropShelf` on Windows or `~/Library/Application Support/DropShelf` on macOS. This does not delete any referenced source file. Use the in-app **Clear all metadata** command for immediate transactional cleanup while the app is running.
 
 ### Milestones
 

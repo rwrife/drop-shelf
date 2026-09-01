@@ -105,6 +105,30 @@ public sealed class ShelfSession
         return removed;
     }
 
+    public int CountExpiring(DateTimeOffset now, TimeSpan retention)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(retention, TimeSpan.Zero);
+        DateTimeOffset boundary = now.ToUniversalTime() - retention;
+        return items.Count(item => !item.IsPinned && item.LastUsedAt <= boundary);
+    }
+
+    public int CountUnpinned() => items.Count(item => !item.IsPinned);
+
+    public int ClearUnpinned()
+    {
+        int removed = items.RemoveAll(item => !item.IsPinned);
+        NormalizeOrdinals();
+        return removed;
+    }
+
+    public void ReplaceAll(IEnumerable<ShelfItem> replacement)
+    {
+        ShelfSession validated = new(replacement ?? throw new ArgumentNullException(nameof(replacement)));
+        items.Clear();
+        items.AddRange(validated.Items);
+        NormalizeOrdinals();
+    }
+
     public int Expire(IClock clock, AppSettings settings)
     {
         ArgumentNullException.ThrowIfNull(clock);

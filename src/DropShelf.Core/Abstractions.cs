@@ -16,6 +16,10 @@ public interface ISettingsStore
     Task<AppSettings> LoadSettingsAsync(CancellationToken cancellationToken = default);
     Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default);
 }
+public interface IResettableShelfStore : IShelfStore, ISettingsStore
+{
+    Task ResetAsync(CancellationToken cancellationToken = default);
+}
 public sealed record StoreSnapshot(IReadOnlyList<ShelfItem> Items, AppSettings Settings);
 public sealed class SystemClock : IClock { public DateTimeOffset UtcNow => DateTimeOffset.UtcNow; }
 public sealed class SystemFileSystem : IFileSystem

@@ -19,7 +19,8 @@ public sealed class SqliteShelfStoreTests : IDisposable
         DateTimeOffset now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         ShelfItem file = ShelfItem.Create(Guid.NewGuid(), "reference", FileReferencePayload.Create(Path.GetFullPath(Path.Combine(directory, "untouched.txt"))), now);
         ShelfItem text = ShelfItem.Create(Guid.NewGuid(), "note", TextPayload.Create("hello"), now, ordinal: 1);
-        AppSettings settings = AppSettings.Create(DockEdge.Left, TimeSpan.FromDays(3), reduceMotion: true);
+        AppSettings settings = AppSettings.Create(DockEdge.Left, TimeSpan.FromDays(3), reduceMotion: true,
+            globalShortcut: "Ctrl+Shift+D", expireOnExit: true);
         await store.SaveAsync(new StoreSnapshot([file, text], settings));
 
         StoreSnapshot reopened = await new SqliteShelfStore(DatabasePath).LoadAsync();
@@ -129,6 +130,38 @@ public sealed class SqliteShelfStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task VersionTwoDatabaseMigratesExitPolicyWithoutLosingSettings()
+    {
+        _ = Directory.CreateDirectory(directory);
+        await using (SqliteConnection connection = new($"Data Source={DatabasePath};Pooling=False"))
+        {
+            await connection.OpenAsync();
+            await using SqliteCommand command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE shelf_items (
+                  id TEXT NOT NULL PRIMARY KEY, kind INTEGER NOT NULL, display_name TEXT NOT NULL, source_hint TEXT NULL,
+                  created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, is_pinned INTEGER NOT NULL, ordinal INTEGER NOT NULL UNIQUE,
+                  text_value TEXT NULL, url_value TEXT NULL, title TEXT NULL, path_value TEXT NULL, file_kind INTEGER NULL,
+                  size_bytes INTEGER NULL, modified_at TEXT NULL, availability INTEGER NULL);
+                CREATE TABLE app_settings (
+                  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
+                  start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
+                  global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space');
+                INSERT INTO app_settings VALUES(1,3,604800,0,1,0,'Ctrl+Shift+D');
+                PRAGMA user_version=2;
+                """;
+            _ = await command.ExecuteNonQueryAsync();
+        }
+
+        AppSettings migrated = (await new SqliteShelfStore(DatabasePath).LoadAsync()).Settings;
+
+        Assert.Equal(DockEdge.Bottom, migrated.DockEdge);
+        Assert.Equal(TimeSpan.FromDays(7), migrated.Retention);
+        Assert.Equal("Ctrl+Shift+D", migrated.GlobalShortcut);
+        Assert.False(migrated.ExpireOnExit);
+    }
+
+    [Fact]
     public async Task CurrentVersionDatabaseWithMalformedShapeIsRejected()
     {
         _ = Directory.CreateDirectory(directory);
@@ -210,6 +243,54 @@ public sealed class SqliteShelfStoreTests : IDisposable
         ShelfStoreException error = await Assert.ThrowsAsync<ShelfStoreException>(() => interruptedStore.SaveAsync(new StoreSnapshot([original, second], AppSettings.Default)));
         Assert.Equal(StoreErrorCode.PersistenceFailure, error.Code);
         Assert.Equal(original.Id, (await store.LoadAsync()).Items.Single().Id);
+    }
+
+    [Fact]
+    public async Task ResetWaitsForInFlightSaveAndLeavesARecreatableEmptyStore()
+    {
+        string path = DatabasePath;
+        TaskCompletionSource<bool> insertStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> releaseInsert = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        SqliteShelfStore store = new(path, async (index, token) =>
+        {
+            insertStarted.SetResult(true);
+            _ = await releaseInsert.Task.WaitAsync(token);
+        });
+        StoreSnapshot snapshot = new(
+            [ShelfItem.Create(Guid.NewGuid(), "private", TextPayload.Create("private"), DateTimeOffset.UtcNow)],
+            AppSettings.Default);
+
+        Task save = store.SaveAsync(snapshot);
+        _ = await insertStarted.Task;
+        Task reset = store.ResetAsync();
+        Assert.False(reset.IsCompleted);
+
+        _ = releaseInsert.TrySetResult(true);
+        await save;
+        await reset;
+
+        StoreSnapshot loaded = await store.LoadAsync();
+        Assert.Empty(loaded.Items);
+        Assert.Equal(AppSettings.Default, loaded.Settings);
+    }
+
+    [Fact]
+    public async Task ExplicitResetClearsOnlyAppMetadataAndRecreatesDefaults()
+    {
+        _ = Directory.CreateDirectory(directory);
+        string sourcePath = Path.Combine(directory, "source.txt");
+        await File.WriteAllTextAsync(sourcePath, "untouched");
+        SqliteShelfStore store = new(DatabasePath);
+        ShelfItem item = ShelfItem.Create(Guid.NewGuid(), "source",
+            FileReferencePayload.Create(sourcePath), DateTimeOffset.UnixEpoch);
+        await store.SaveAsync(new StoreSnapshot([item], AppSettings.Create(expireOnExit: true)));
+
+        await store.ResetAsync();
+        StoreSnapshot reset = await store.LoadAsync();
+
+        Assert.Empty(reset.Items);
+        Assert.Equal(AppSettings.Default, reset.Settings);
+        Assert.Equal("untouched", await File.ReadAllTextAsync(sourcePath));
     }
 
     public void Dispose()

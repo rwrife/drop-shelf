@@ -124,6 +124,7 @@ public sealed class MainWindowTests
         window.ShowShelfState(ShelfUiState.RecoverableError);
         Assert.Equal("Shelf items could not be loaded.", window.FindControl<TextBlock>("StateMessage")?.Text);
         Assert.True(window.FindControl<Button>("RetryButton")?.IsVisible);
+        Assert.True(window.FindControl<Button>("ResetLocalDataButton")?.IsVisible);
         Grid recoveryRow = Assert.IsType<Grid>(window.FindControl<TextBlock>("StateMessage")?.Parent);
         Assert.Equal(2, recoveryRow.ColumnDefinitions.Count);
         window.ShowShelfState(ShelfUiState.Unavailable);
@@ -132,6 +133,135 @@ public sealed class MainWindowTests
         window.ShowShelfState(ShelfUiState.Expired);
         Assert.Equal("Expired items were removed according to your retention setting.",
             window.FindControl<TextBlock>("StateMessage")?.Text);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task StartupLoadRejectsMutationsUntilStoredSnapshotIsApplied()
+    {
+        BlockingLoadShelfStore store = new(new Core.StoreSnapshot([], Core.AppSettings.Default));
+        Core.ShelfDataService service = new(store);
+        MainWindow window = new();
+
+        Task loading = App.LoadAndApplyStartupDataForHostAsync(window, service);
+        _ = await store.LoadStarted.Task;
+
+        Core.DropAdmissionResult rejected = window.AcceptDropForHost(
+            new Core.InboundDropPayload([], "during-load", null), DateTimeOffset.UtcNow);
+        Assert.False(rejected.Accepted);
+        Assert.Empty(window.Session.Items);
+
+        _ = store.ReleaseLoad.TrySetResult(true);
+        await loading;
+
+        Core.DropAdmissionResult accepted = window.AcceptDropForHost(
+            new Core.InboundDropPayload([], null, "after-load"), DateTimeOffset.UtcNow);
+        Assert.True(accepted.Accepted);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task QueuedPersistenceCapturesEachMutationSnapshotBeforeBackgroundSave()
+    {
+        BlockingSaveShelfStore store = new();
+        Core.ShelfDataService service = new(store);
+        MainWindow window = new();
+        window.ConfigureLocalDataForHost(service, Core.AppSettings.Default);
+
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload([], null, "first"), DateTimeOffset.UtcNow);
+        _ = await store.FirstSaveStarted.Task;
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload([], null, "second"), DateTimeOffset.UtcNow);
+        _ = store.ReleaseFirstSave.TrySetResult(true);
+        await window.FlushPersistenceForHostAsync();
+
+        Assert.Equal(2, store.Saved.Count);
+        _ = Assert.Single(store.Saved[0].Items);
+        Assert.Equal(2, store.Saved[1].Items.Count);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task StartupDataRestoresSessionExpiresOldUnpinnedAndPersistsDrops()
+    {
+        Core.ShelfItem old = Core.ShelfItem.Create(Guid.NewGuid(), "old", Core.TextPayload.Create("old"),
+            Now - TimeSpan.FromDays(2));
+        Core.ShelfItem pinned = Core.ShelfItem.Create(Guid.NewGuid(), "pinned", Core.TextPayload.Create("pinned"),
+            Now - TimeSpan.FromDays(2), isPinned: true, ordinal: 1);
+        RecordingShelfStore store = new(new Core.StoreSnapshot([old, pinned], Core.AppSettings.Default));
+        Core.ShelfDataService service = new(store, new FixedClock(Now));
+        MainWindow window = new();
+        window.ConfigureLocalDataForHost(service, Core.AppSettings.Default);
+
+        await App.LoadAndApplyStartupDataForHostAsync(window, service);
+        _ = window.AcceptDropForHost(new Core.InboundDropPayload(null, null, "new private text"), Now);
+        await window.FlushPersistenceForHostAsync();
+
+        Assert.Equal(2, window.Session.Items.Count);
+        Assert.DoesNotContain(window.Session.Items, item => item.Id == old.Id);
+        Assert.Contains(window.Session.Items, item => item.Id == pinned.Id);
+        Assert.Equal(2, store.Saved!.Items.Count);
+        Assert.DoesNotContain("new private text", window.FindControl<TextBlock>("DropStatus")!.Text, StringComparison.Ordinal);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task PrivacyControlsPreviewPolicyClearUnpinnedAndPreservePinnedItems()
+    {
+        Core.ShelfItem old = Core.ShelfItem.Create(Guid.NewGuid(), "old", Core.TextPayload.Create("private old"),
+            Now - TimeSpan.FromDays(2));
+        Core.ShelfItem pinned = Core.ShelfItem.Create(Guid.NewGuid(), "pinned", Core.TextPayload.Create("private pinned"),
+            Now - TimeSpan.FromDays(2), isPinned: true, ordinal: 1);
+        RecordingShelfStore store = new(new Core.StoreSnapshot([old, pinned], Core.AppSettings.Default));
+        MainWindow window = new();
+        window.ConfigureLocalDataForHost(new Core.ShelfDataService(store, new FixedClock(Now)), Core.AppSettings.Default);
+        window.ApplySnapshotForHost(new Core.StoreSnapshot([old, pinned], Core.AppSettings.Default));
+
+        int preview = window.PreviewRetentionForHost(TimeSpan.FromDays(1), expireOnExit: false);
+        int removed = await window.ClearUnpinnedForHostAsync();
+
+        Assert.Equal(1, preview);
+        Assert.Equal(1, removed);
+        Assert.Equal(pinned.Id, Assert.Single(window.Session.Items).Id);
+        Assert.Contains("1 item", window.FindControl<TextBlock>("RetentionPreview")!.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("private", window.FindControl<TextBlock>("DropStatus")!.Text, StringComparison.Ordinal);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task MetadataImportIsTransactionalAndPrivateWhileExportIncludesNoFileBytes()
+    {
+        string path = Path.GetFullPath("private-source.txt");
+        Core.ShelfItem item = Core.ShelfItem.Create(Guid.NewGuid(), "private-source.txt",
+            Core.FileReferencePayload.Create(path), Now);
+        RecordingShelfStore store = new(new Core.StoreSnapshot([item], Core.AppSettings.Default));
+        MainWindow window = new();
+        window.ConfigureLocalDataForHost(new Core.ShelfDataService(store, new FixedClock(Now)), Core.AppSettings.Default);
+        window.ApplySnapshotForHost(new Core.StoreSnapshot([item], Core.AppSettings.Default));
+
+        byte[] exported = window.ExportMetadataForHost();
+        bool imported = await window.ImportMetadataForHostAsync(/*lang=json,strict*/ "{\"schemaVersion\":999,\"private\":\"secret\"}"u8.ToArray());
+
+        Assert.False(imported);
+        Assert.Equal(item.Id, Assert.Single(window.Session.Items).Id);
+        Assert.DoesNotContain("fileContents", System.Text.Encoding.UTF8.GetString(exported), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Import failed. Current shelf data was kept.", window.FindControl<TextBlock>("DropStatus")!.Text);
+        Assert.DoesNotContain(path, window.FindControl<TextBlock>("DropStatus")!.Text, StringComparison.Ordinal);
+        window.Close();
+    }
+
+    [AvaloniaFact]
+    public void PrivacyControlsExplainRetentionAndAppOwnedStorageWithoutExposingPayloads()
+    {
+        MainWindow window = new();
+
+        Assert.NotNull(window.FindControl<ComboBox>("RetentionPicker"));
+        Assert.NotNull(window.FindControl<Button>("ClearUnpinnedButton"));
+        Assert.NotNull(window.FindControl<Button>("ExportButton"));
+        Assert.NotNull(window.FindControl<Button>("ImportButton"));
+        string disclosure = window.FindControl<TextBlock>("StorageDisclosure")!.Text ?? string.Empty;
+        Assert.Contains("24 hours", disclosure, StringComparison.Ordinal);
+        Assert.Contains("DropShelf", disclosure, StringComparison.Ordinal);
+        Assert.Contains("file contents", disclosure, StringComparison.OrdinalIgnoreCase);
         window.Close();
     }
 
@@ -491,5 +621,56 @@ public sealed class MainWindowTests
 
         public Task SaveSettingsAsync(Core.AppSettings value, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : Core.IClock
+    {
+        public DateTimeOffset UtcNow => now;
+    }
+
+    private sealed class BlockingLoadShelfStore(Core.StoreSnapshot snapshot) : Core.IShelfStore
+    {
+        public TaskCompletionSource<bool> LoadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseLoad { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<Core.StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default)
+        {
+            _ = LoadStarted.TrySetResult(true);
+            _ = await ReleaseLoad.Task.WaitAsync(cancellationToken);
+            return snapshot;
+        }
+
+        public Task SaveAsync(Core.StoreSnapshot value, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class BlockingSaveShelfStore : Core.IShelfStore
+    {
+        public TaskCompletionSource<bool> FirstSaveStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ReleaseFirstSave { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<Core.StoreSnapshot> Saved { get; } = [];
+
+        public Task<Core.StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(new Core.StoreSnapshot([], Core.AppSettings.Default));
+
+        public async Task SaveAsync(Core.StoreSnapshot snapshot, CancellationToken cancellationToken = default)
+        {
+            Saved.Add(snapshot);
+            if (Saved.Count == 1)
+            {
+                _ = FirstSaveStarted.TrySetResult(true);
+                _ = await ReleaseFirstSave.Task.WaitAsync(cancellationToken);
+            }
+        }
+    }
+
+    private sealed class RecordingShelfStore(Core.StoreSnapshot snapshot) : Core.IShelfStore
+    {
+        public Core.StoreSnapshot? Saved { get; private set; }
+        public Task<Core.StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+        public Task SaveAsync(Core.StoreSnapshot value, CancellationToken cancellationToken = default)
+        {
+            Saved = value;
+            return Task.CompletedTask;
+        }
     }
 }

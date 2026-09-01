@@ -108,6 +108,17 @@ public sealed class ShelfViewModel
         RefreshCards();
     }
 
+    public void ItemsReplaced()
+    {
+        selectedIds.Clear();
+        FocusedItemId = session.Items.Count == 0 ? null : session.Items[0].Id;
+        FocusTarget = FocusedItemId is null ? ShelfFocusTarget.DropSurface : ShelfFocusTarget.Item;
+        Announcement = session.Items.Count == 0
+            ? "Shelf is empty. Drop files, text, or URLs here."
+            : $"Loaded {session.Items.Count} item{(session.Items.Count == 1 ? string.Empty : "s")}.";
+        RefreshCards();
+    }
+
     public void SelectAll()
     {
         selectedIds.Clear();

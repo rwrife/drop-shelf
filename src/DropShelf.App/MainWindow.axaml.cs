@@ -6,8 +6,10 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using Avalonia.Platform;
 using DropShelf.Core;
+using DropShelf.Infrastructure;
 using DropShelf.Platform.macOS;
 using DropShelf.Platform.Windows;
 using System.Runtime.InteropServices;
@@ -65,6 +67,14 @@ public sealed class OutboundDataTransfer : IDisposable
 
 public sealed partial class MainWindow : Window
 {
+    private static readonly IReadOnlyList<RetentionChoice> RetentionChoices =
+    [
+        new("Keep for 1 hour", TimeSpan.FromHours(1), false),
+        new("Keep for 24 hours", TimeSpan.FromHours(24), false),
+        new("Keep for 7 days", TimeSpan.FromDays(7), false),
+        new("Keep for 30 days", TimeSpan.FromDays(30), false),
+        new("Clear unpinned on app exit", AppSettings.DefaultRetention, true),
+    ];
     private readonly DropAdmissionService admission;
     private Point? dragStart;
     private bool dragInProgress;
@@ -73,12 +83,18 @@ public sealed partial class MainWindow : Window
     private readonly Func<Task>? retryShelfLoad;
     private ShelfBounds? expandedBounds;
     private bool retryInProgress;
+    private bool localDataLoading;
     private ISettingsStore? nativeSettingsStore;
     private INativeShell? nativeSettingsShell;
     private AppSettings nativeSettings = AppSettings.Default;
     private bool updatingNativeControls;
     private bool nativeSettingsUpdateInProgress;
     private bool recoveringDock;
+    private ShelfDataService? dataService;
+    private AppSettings currentSettings;
+    private Task pendingPersistence = Task.CompletedTask;
+    private IResettableShelfStore? resettableStore;
+    private BoundedMetadataCache? metadataCache;
 
     public MainWindow()
         : this(AppSettings.Default, null, null)
@@ -100,6 +116,7 @@ public sealed partial class MainWindow : Window
         ArgumentNullException.ThrowIfNull(settings);
         AvaloniaXamlLoader.Load(this);
         dockEdge = settings.DockEdge;
+        currentSettings = settings;
         this.retryShelfLoad = retryShelfLoad;
         Session = new ShelfSession();
         ViewModel = new ShelfViewModel(Session, DateTimeOffset.UtcNow, actions);
@@ -107,18 +124,27 @@ public sealed partial class MainWindow : Window
         DragDrop.SetAllowDrop(this, true);
         DragDrop.AddDropHandler(this, OnDrop);
         AddHandler(KeyDownEvent, OnShelfKeyDown);
-        this.FindControl<Button>("MoveUpButton")!.Click += (_, _) => RunAndRender(() => _ = ViewModel.MoveSelected(-1));
-        this.FindControl<Button>("MoveDownButton")!.Click += (_, _) => RunAndRender(() => _ = ViewModel.MoveSelected(1));
+        this.FindControl<Button>("MoveUpButton")!.Click += (_, _) => RunMutatingAndRender(() => _ = ViewModel.MoveSelected(-1));
+        this.FindControl<Button>("MoveDownButton")!.Click += (_, _) => RunMutatingAndRender(() => _ = ViewModel.MoveSelected(1));
         this.FindControl<Button>("CopyButton")!.Click += async (_, _) => await RunViewModelActionAsync(ViewModel.CopySelectedAsync);
         this.FindControl<Button>("OpenButton")!.Click += async (_, _) => await RunViewModelActionAsync(ViewModel.OpenSelectedAsync);
         this.FindControl<Button>("RevealButton")!.Click += async (_, _) => await RunViewModelActionAsync(ViewModel.RevealSelectedAsync);
-        this.FindControl<Button>("PinButton")!.Click += (_, _) => RunAndRender(ViewModel.TogglePinned);
-        this.FindControl<Button>("RemoveButton")!.Click += (_, _) => RunAndRender(() => _ = ViewModel.RemoveSelected());
-        this.FindControl<Button>("ClearButton")!.Click += (_, _) => RunAndRender(ViewModel.Clear);
+        this.FindControl<Button>("PinButton")!.Click += (_, _) => RunMutatingAndRender(ViewModel.TogglePinned);
+        this.FindControl<Button>("RemoveButton")!.Click += (_, _) => RunMutatingAndRender(() => _ = ViewModel.RemoveSelected());
+        this.FindControl<Button>("ClearButton")!.Click += async (_, _) => await RunDataActionAsync(ClearAllForHostAsync);
+        this.FindControl<Button>("ClearUnpinnedButton")!.Click += async (_, _) => await RunDataActionAsync(async () => _ = await ClearUnpinnedForHostAsync());
         this.FindControl<Button>("CollapseButton")!.Click += (_, _) => SetCollapsed(true);
         this.FindControl<Button>("ExpandButton")!.Click += (_, _) => SetCollapsed(false);
         this.FindControl<Button>("RetryButton")!.Click += OnRetryShelfLoad;
+        this.FindControl<Button>("ResetLocalDataButton")!.Click += OnResetLocalData;
         this.FindControl<ComboBox>("ShortcutPicker")!.ItemsSource = AppSettings.SupportedGlobalShortcuts;
+        ComboBox retentionPicker = this.FindControl<ComboBox>("RetentionPicker")!;
+        retentionPicker.ItemsSource = RetentionChoices;
+        retentionPicker.SelectedItem = RetentionChoices[1];
+        retentionPicker.SelectionChanged += OnRetentionSelectionChanged;
+        this.FindControl<Button>("ApplyRetentionButton")!.Click += OnApplyRetention;
+        this.FindControl<Button>("ExportButton")!.Click += OnExportMetadata;
+        this.FindControl<Button>("ImportButton")!.Click += OnImportMetadata;
         this.FindControl<Button>("ApplyShortcutButton")!.Click += OnApplyShortcut;
         this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsCheckedChanged += OnLaunchAtLoginChanged;
 
@@ -131,17 +157,277 @@ public sealed partial class MainWindow : Window
     public ShelfSession Session { get; }
     public ShelfViewModel ViewModel { get; }
 
+    public void ConfigureLocalDataForHost(ShelfDataService service, AppSettings settings)
+    {
+        dataService = service ?? throw new ArgumentNullException(nameof(service));
+        currentSettings = settings ?? throw new ArgumentNullException(nameof(settings));
+        ConfigurePrivacyControls(settings);
+    }
+
+    private void ConfigurePrivacyControls(AppSettings settings)
+    {
+        RetentionChoice? selected = RetentionChoices.FirstOrDefault(choice =>
+            choice.ExpireOnExit == settings.ExpireOnExit && (choice.ExpireOnExit || choice.Retention == settings.Retention));
+        if (selected is null)
+        {
+            selected = new($"Keep for {settings.Retention.TotalMinutes:0} minutes", settings.Retention, false);
+            this.FindControl<ComboBox>("RetentionPicker")!.ItemsSource = RetentionChoices.Append(selected).ToArray();
+        }
+        this.FindControl<ComboBox>("RetentionPicker")!.SelectedItem = selected;
+    }
+
+    public void ConfigureRecoveryForHost(IResettableShelfStore store, BoundedMetadataCache cache)
+    {
+        resettableStore = store ?? throw new ArgumentNullException(nameof(store));
+        metadataCache = cache ?? throw new ArgumentNullException(nameof(cache));
+    }
+
+    public void ApplySnapshotForHost(StoreSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        Session.ReplaceAll(snapshot.Items);
+        ViewModel.ItemsReplaced();
+        currentSettings = snapshot.Settings;
+        ApplySettings(snapshot.Settings);
+        Render(ViewModel.Announcement);
+    }
+
+    public void SetLocalDataLoadingForHost(bool loading) => localDataLoading = loading;
+
+    public int PreviewRetentionForHost(TimeSpan retention, bool expireOnExit)
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        int affected = service.PreviewPolicyChange(Session, retention, expireOnExit);
+        this.FindControl<TextBlock>("RetentionPreview")!.Text =
+            $"Changing retention currently affects {affected} item{(affected == 1 ? string.Empty : "s")}.";
+        return affected;
+    }
+
+    public async Task<PolicyChangeResult> ChangeRetentionForHostAsync(TimeSpan retention, bool expireOnExit)
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        await pendingPersistence;
+        PolicyChangeResult result = await service.ChangePolicyAsync(Session, currentSettings, retention, expireOnExit);
+        currentSettings = result.Settings;
+        nativeSettings = result.Settings;
+        ViewModel.ItemsReplaced();
+        Render($"Retention saved. {result.AffectedItems} item{(result.AffectedItems == 1 ? string.Empty : "s")} affected.");
+        return result;
+    }
+
+    public async Task<int> ClearUnpinnedForHostAsync()
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        await pendingPersistence;
+        int removed = await service.ClearUnpinnedAsync(Session, currentSettings);
+        ViewModel.ItemsReplaced();
+        Render($"Cleared {removed} unpinned item{(removed == 1 ? string.Empty : "s")}.");
+        return removed;
+    }
+
+    public async Task ClearAllForHostAsync()
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        await pendingPersistence;
+        bool disableLogin = currentSettings.StartAtLogin;
+        currentSettings = await service.ClearAllAsync(Session);
+        nativeSettings = currentSettings;
+        bool cacheCleared = true;
+        try
+        {
+            metadataCache?.Clear();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            cacheCleared = false;
+        }
+        if (nativeSettingsShell is not null)
+        {
+            _ = nativeSettingsShell.ConfigureShortcut(AppSettings.DefaultGlobalShortcut);
+            if (disableLogin)
+            {
+                _ = nativeSettingsShell.SetLaunchAtLogin(false);
+            }
+        }
+        ConfigurePrivacyControls(currentSettings);
+        updatingNativeControls = true;
+        this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem = currentSettings.GlobalShortcut;
+        this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsChecked = currentSettings.StartAtLogin;
+        updatingNativeControls = false;
+        ViewModel.ItemsReplaced();
+        Render(cacheCleared
+            ? "Cleared all local shelf metadata and restored default settings."
+            : "Shelf metadata and settings were cleared, but the app cache could not be fully cleared. Retry clear all metadata.");
+    }
+
+    public byte[] ExportMetadataForHost()
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        return service.Export(Session, currentSettings);
+    }
+
+    public async Task<bool> ImportMetadataForHostAsync(ReadOnlyMemory<byte> json)
+    {
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        try
+        {
+            await pendingPersistence;
+            currentSettings = await service.ImportAsync(json, Session);
+            nativeSettings = currentSettings;
+            ConfigurePrivacyControls(currentSettings);
+            ViewModel.ItemsReplaced();
+            Render($"Imported {Session.Items.Count} item{(Session.Items.Count == 1 ? string.Empty : "s")}.");
+            return true;
+        }
+        catch
+        {
+            Render("Import failed. Current shelf data was kept.");
+            return false;
+        }
+    }
+
+    public Task FlushPersistenceForHostAsync() => pendingPersistence;
+
+    public async Task<int> PrepareForExitForHostAsync()
+    {
+        await pendingPersistence.ConfigureAwait(false);
+        ShelfDataService service = dataService ?? throw new InvalidOperationException("Local data is not configured.");
+        return await Task.Run(() => service.PrepareForExitAsync(Session, currentSettings)).ConfigureAwait(false);
+    }
+
+    private void QueuePersistenceForHost()
+    {
+        if (dataService is null)
+        {
+            return;
+        }
+        StoreSnapshot snapshot = new([.. Session.Items], currentSettings);
+        pendingPersistence = PersistAfterAsync(pendingPersistence, snapshot);
+    }
+
+    private async Task PersistAfterAsync(Task previous, StoreSnapshot snapshot)
+    {
+        try
+        {
+            await previous.ConfigureAwait(false);
+            await Task.Run(() => dataService!.SaveSnapshotAsync(snapshot)).ConfigureAwait(false);
+        }
+        catch
+        {
+            Dispatcher.UIThread.Post(() => Render("Local metadata could not be saved. Your source files were not changed."));
+        }
+    }
+
     public void ConfigureNativeSettingsForHost(ISettingsStore settingsStore, INativeShell shell, AppSettings settings)
     {
         nativeSettingsStore = settingsStore ?? throw new ArgumentNullException(nameof(settingsStore));
         nativeSettingsShell = shell ?? throw new ArgumentNullException(nameof(shell));
         nativeSettings = settings ?? throw new ArgumentNullException(nameof(settings));
+        currentSettings = settings;
         updatingNativeControls = true;
         this.FindControl<ComboBox>("ShortcutPicker")!.SelectedItem = settings.GlobalShortcut;
         this.FindControl<CheckBox>("LaunchAtLoginToggle")!.IsChecked = settings.StartAtLogin;
 
         updatingNativeControls = false;
     }
+
+    private void OnRetentionSelectionChanged(object? sender, SelectionChangedEventArgs eventArgs)
+    {
+        if (dataService is not null && this.FindControl<ComboBox>("RetentionPicker")!.SelectedItem is RetentionChoice choice)
+        {
+            _ = PreviewRetentionForHost(choice.Retention, choice.ExpireOnExit);
+        }
+    }
+
+    private async void OnApplyRetention(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (this.FindControl<ComboBox>("RetentionPicker")!.SelectedItem is RetentionChoice choice)
+        {
+            await RunDataActionAsync(async () => _ = await ChangeRetentionForHostAsync(choice.Retention, choice.ExpireOnExit));
+        }
+    }
+
+    private async void OnExportMetadata(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (localDataLoading)
+        {
+            SetStatusText("Wait for local shelf metadata to finish loading.");
+            return;
+        }
+        try
+        {
+            IStorageFile? target = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Export Drop Shelf metadata",
+                SuggestedFileName = "drop-shelf-metadata.json",
+                FileTypeChoices = [JsonFileType],
+            });
+            if (target is null)
+            {
+                return;
+            }
+            byte[] data = ExportMetadataForHost();
+            await using Stream stream = await target.OpenWriteAsync();
+            stream.SetLength(0);
+            await stream.WriteAsync(data);
+            SetStatusText($"Exported {Session.Items.Count} item{(Session.Items.Count == 1 ? string.Empty : "s")} as metadata only.");
+        }
+        catch
+        {
+            SetStatusText("Metadata export failed. Current shelf data was kept.");
+        }
+    }
+
+    private async void OnImportMetadata(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (localDataLoading)
+        {
+            SetStatusText("Wait for local shelf metadata to finish loading.");
+            return;
+        }
+        try
+        {
+            IReadOnlyList<IStorageFile> selected = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Import Drop Shelf metadata",
+                AllowMultiple = false,
+                FileTypeFilter = [JsonFileType],
+            });
+            IStorageFile? source = selected.SingleOrDefault();
+            if (source is null)
+            {
+                return;
+            }
+            await using Stream stream = await source.OpenReadAsync();
+            byte[] data = await ReadBoundedImportAsync(stream);
+            _ = await ImportMetadataForHostAsync(data);
+        }
+        catch
+        {
+            SetStatusText("Import failed. Current shelf data was kept.");
+        }
+    }
+
+    private static async Task<byte[]> ReadBoundedImportAsync(Stream source)
+    {
+        using MemoryStream destination = new();
+        byte[] buffer = new byte[81920];
+        while (true)
+        {
+            int read = await source.ReadAsync(buffer);
+            if (read == 0)
+            {
+                return destination.ToArray();
+            }
+            if (destination.Length + read > DomainLimits.MaxExportBytes)
+            {
+                throw new InvalidDataException("Import exceeds the metadata size limit.");
+            }
+            await destination.WriteAsync(buffer.AsMemory(0, read));
+        }
+    }
+
+    private static readonly FilePickerFileType JsonFileType = new("JSON metadata") { Patterns = ["*.json"] };
 
     private async void OnApplyShortcut(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
     {
@@ -155,6 +441,7 @@ public sealed partial class MainWindow : Window
         SetNativeSettingsControlsEnabled(false);
         try
         {
+            await pendingPersistence;
             NativeShellStatus status = nativeSettingsShell.ConfigureShortcut(shortcut);
             if (status != NativeShellStatus.Success)
             {
@@ -168,6 +455,7 @@ public sealed partial class MainWindow : Window
             {
                 await nativeSettingsStore.SaveSettingsAsync(changed);
                 nativeSettings = changed;
+                currentSettings = changed;
                 ShowNativeShellStatus(status);
             }
             catch
@@ -207,6 +495,7 @@ public sealed partial class MainWindow : Window
         SetNativeSettingsControlsEnabled(false);
         try
         {
+            await pendingPersistence;
             NativeShellStatus status = nativeSettingsShell.SetLaunchAtLogin(requested);
             if (status != NativeShellStatus.Success)
             {
@@ -222,6 +511,7 @@ public sealed partial class MainWindow : Window
             {
                 await nativeSettingsStore.SaveSettingsAsync(changed);
                 nativeSettings = changed;
+                currentSettings = changed;
                 SetStatusText("Launch-at-login setting saved.");
             }
             catch
@@ -252,7 +542,8 @@ public sealed partial class MainWindow : Window
 
     private AppSettings CopyNativeSettings(bool? startAtLogin = null, string? globalShortcut = null) =>
         AppSettings.Create(nativeSettings.DockEdge, nativeSettings.Retention, startAtLogin ?? nativeSettings.StartAtLogin,
-            nativeSettings.ReduceMotion, nativeSettings.HighContrast, globalShortcut ?? nativeSettings.GlobalShortcut);
+            nativeSettings.ReduceMotion, nativeSettings.HighContrast, globalShortcut ?? nativeSettings.GlobalShortcut,
+            nativeSettings.ExpireOnExit);
 
     public void ToggleVisibilityForHost()
     {
@@ -291,10 +582,17 @@ public sealed partial class MainWindow : Window
 
     public DropAdmissionResult AcceptDropForHost(InboundDropPayload payload, DateTimeOffset createdAt)
     {
+        if (localDataLoading)
+        {
+            const string message = "Wait for local shelf metadata to finish loading before adding items.";
+            Render(message);
+            return new(false, [], message);
+        }
         DropAdmissionResult result = admission.Admit(payload, createdAt);
         if (result.Accepted)
         {
             ViewModel.ExistingItemsAdded(result.Items);
+            QueuePersistenceForHost();
         }
         Render(result.UserMessage);
         RestoreViewModelFocus();
@@ -613,6 +911,7 @@ public sealed partial class MainWindow : Window
     {
         TextBlock message = this.FindControl<TextBlock>("StateMessage")!;
         Button retry = this.FindControl<Button>("RetryButton")!;
+        Button reset = this.FindControl<Button>("ResetLocalDataButton")!;
         string status;
         (message.Text, retry.IsVisible, status) = state switch
         {
@@ -625,7 +924,32 @@ public sealed partial class MainWindow : Window
             ShelfUiState.RecoverableError => ("Shelf items could not be loaded.", true, "Shelf items could not be loaded."),
             _ => throw new ArgumentOutOfRangeException(nameof(state)),
         };
+        reset.IsVisible = state == ShelfUiState.RecoverableError;
         SetStatusText(status);
+    }
+
+    private async void OnResetLocalData(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
+    {
+        if (resettableStore is null || metadataCache is null || dataService is null)
+        {
+            SetStatusText("Local metadata reset is unavailable.");
+            return;
+        }
+        try
+        {
+            await pendingPersistence;
+            await resettableStore.ResetAsync();
+            metadataCache.Clear();
+            ShelfLoadResult loaded = await dataService.LoadAsync();
+            ApplySnapshotForHost(loaded.Snapshot);
+            SetLocalDataLoadingForHost(false);
+            ShowShelfState(ShelfUiState.Ready);
+            SetStatusText("Local shelf metadata was reset. Source files were not changed.");
+        }
+        catch
+        {
+            ShowShelfState(ShelfUiState.RecoverableError);
+        }
     }
 
     private async void OnRetryShelfLoad(object? sender, Avalonia.Interactivity.RoutedEventArgs eventArgs)
@@ -686,15 +1010,15 @@ public sealed partial class MainWindow : Window
         }
         else if (key == Key.Delete)
         {
-            RunAndRender(() => _ = ViewModel.RemoveSelected());
+            RunMutatingAndRender(() => _ = ViewModel.RemoveSelected());
         }
         else if (alt && key is Key.Up or Key.Left)
         {
-            RunAndRender(() => _ = ViewModel.MoveSelected(-1));
+            RunMutatingAndRender(() => _ = ViewModel.MoveSelected(-1));
         }
         else if (alt && key is Key.Down or Key.Right)
         {
-            RunAndRender(() => _ = ViewModel.MoveSelected(1));
+            RunMutatingAndRender(() => _ = ViewModel.MoveSelected(1));
         }
         else if (key == Key.Enter)
         {
@@ -702,7 +1026,7 @@ public sealed partial class MainWindow : Window
         }
         else if (key == Key.P)
         {
-            RunAndRender(ViewModel.TogglePinned);
+            RunMutatingAndRender(ViewModel.TogglePinned);
         }
         else if (key == Key.Escape)
         {
@@ -736,6 +1060,35 @@ public sealed partial class MainWindow : Window
         this.FindControl<Button>("CopyButton")!.IsEnabled = enabled;
         this.FindControl<Button>("OpenButton")!.IsEnabled = enabled;
         this.FindControl<Button>("RevealButton")!.IsEnabled = enabled;
+    }
+
+    private void RunMutatingAndRender(Action action)
+    {
+        if (localDataLoading)
+        {
+            Render("Wait for local shelf metadata to finish loading.");
+            return;
+        }
+        RunAndRender(action);
+        QueuePersistenceForHost();
+    }
+
+    private async Task RunDataActionAsync(Func<Task> action)
+    {
+        if (localDataLoading)
+        {
+            Render("Wait for local shelf metadata to finish loading.");
+            return;
+        }
+        try
+        {
+            await action();
+            RestoreViewModelFocus();
+        }
+        catch
+        {
+            Render("Local metadata could not be changed. Your source files were not changed.");
+        }
     }
 
     private void RunAndRender(Action action)
@@ -867,6 +1220,11 @@ public sealed partial class MainWindow : Window
         double scale = scaleOverride ?? (RenderScaling <= 0 ? 1 : RenderScaling);
         PixelSize size = PixelSize.FromSize(ClientSize, scale);
         return new ShelfBounds(Position.X, Position.Y, size.Width, size.Height);
+    }
+
+    private sealed record RetentionChoice(string Label, TimeSpan Retention, bool ExpireOnExit)
+    {
+        public override string ToString() => Label;
     }
 
     private sealed record ShelfCardTag(ShelfItem Item);

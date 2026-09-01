@@ -10,11 +10,13 @@ public sealed class ShelfStoreException(StoreErrorCode code, string message, Exc
     public StoreErrorCode Code { get; } = code;
 }
 
-public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
+public sealed class SqliteShelfStore : IResettableShelfStore, IDisposable
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
     private readonly string connectionString;
+    private readonly string databasePath;
     private readonly Func<int, CancellationToken, ValueTask>? beforeInsert;
+    private readonly SemaphoreSlim lifecycleGate = new(1, 1);
 
     public SqliteShelfStore(string databasePath) : this(databasePath, null) { }
 
@@ -28,10 +30,31 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
         string fullPath = Path.GetFullPath(databasePath);
         _ = Directory.CreateDirectory(Path.GetDirectoryName(fullPath) ?? throw new ArgumentException("The database path has no directory.", nameof(databasePath)));
         connectionString = new SqliteConnectionStringBuilder { DataSource = fullPath, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString();
+        this.databasePath = fullPath;
         this.beforeInsert = beforeInsert;
     }
 
-    public async Task<StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default)
+    public Task<StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default) =>
+        RunLockedAsync(LoadCoreAsync, cancellationToken);
+
+    public Task SaveAsync(StoreSnapshot snapshot, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return RunLockedAsync(token => SaveCoreAsync(snapshot, token), cancellationToken);
+    }
+
+    public Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return RunLockedAsync(token => SaveSettingsCoreAsync(settings, token), cancellationToken);
+    }
+
+    public Task ResetAsync(CancellationToken cancellationToken = default) =>
+        RunLockedAsync(ResetCoreAsync, cancellationToken);
+
+    public void Dispose() => lifecycleGate.Dispose();
+
+    private async Task<StoreSnapshot> LoadCoreAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -50,7 +73,7 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
         { throw new ShelfStoreException(StoreErrorCode.CorruptData, "The local store could not be read safely.", exception); }
     }
 
-    public async Task SaveAsync(StoreSnapshot snapshot, CancellationToken cancellationToken = default)
+    private async Task SaveCoreAsync(StoreSnapshot snapshot, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ShelfSession validated = new(snapshot.Items);
@@ -79,7 +102,7 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
 
     public async Task<AppSettings> LoadSettingsAsync(CancellationToken cancellationToken = default) => (await LoadAsync(cancellationToken)).Settings;
 
-    public async Task SaveSettingsAsync(AppSettings settings, CancellationToken cancellationToken = default)
+    private async Task SaveSettingsCoreAsync(AppSettings settings, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
         try
@@ -92,6 +115,72 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
         }
         catch (ShelfStoreException) { throw; }
         catch (SqliteException exception) { throw new ShelfStoreException(StoreErrorCode.PersistenceFailure, "Settings could not be saved atomically.", exception); }
+    }
+
+    private Task ResetCoreAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string tombstone = $"{databasePath}.reset-{Guid.NewGuid():N}";
+        bool moved = false;
+        try
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Move(databasePath, tombstone);
+                moved = true;
+            }
+            File.Delete(databasePath + "-wal");
+            File.Delete(databasePath + "-shm");
+            if (moved)
+            {
+                File.Delete(tombstone);
+            }
+            return Task.CompletedTask;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            try
+            {
+                if (moved && File.Exists(tombstone) && !File.Exists(databasePath))
+                {
+                    File.Move(tombstone, databasePath);
+                }
+            }
+            catch (Exception restoreException) when (restoreException is IOException or UnauthorizedAccessException)
+            {
+                return Task.FromException(new ShelfStoreException(
+                    StoreErrorCode.PersistenceFailure, "Local metadata reset failed and the original store could not be restored.",
+                    new AggregateException(exception, restoreException)));
+            }
+            return Task.FromException(new ShelfStoreException(
+                StoreErrorCode.PersistenceFailure, "Local metadata could not be reset.", exception));
+        }
+    }
+
+    private async Task<T> RunLockedAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
+    {
+        await lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await action(cancellationToken);
+        }
+        finally
+        {
+            _ = lifecycleGate.Release();
+        }
+    }
+
+    private async Task RunLockedAsync(Func<CancellationToken, Task> action, CancellationToken cancellationToken)
+    {
+        await lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            await action(cancellationToken);
+        }
+        finally
+        {
+            _ = lifecycleGate.Release();
+        }
     }
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken token)
@@ -113,18 +202,28 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
 
         if (version == CurrentSchemaVersion)
         {
-            await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
+            await ValidateSchemaShapeAsync(connection, includeShortcut: true, includeExitPolicy: true, token);
             return;
         }
 
         if (version == 1)
         {
-            await ValidateSchemaShapeAsync(connection, includeShortcut: false, token);
+            await ValidateSchemaShapeAsync(connection, includeShortcut: false, includeExitPolicy: false, token);
             await using SqliteTransaction migration = (SqliteTransaction)await connection.BeginTransactionAsync(token);
             await ExecuteAsync(connection, migration,
                 "ALTER TABLE app_settings ADD COLUMN global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space'; PRAGMA user_version = 2;", token);
             await migration.CommitAsync(token);
-            await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
+            version = 2;
+        }
+
+        if (version == 2)
+        {
+            await ValidateSchemaShapeAsync(connection, includeShortcut: true, includeExitPolicy: false, token);
+            await using SqliteTransaction migration = (SqliteTransaction)await connection.BeginTransactionAsync(token);
+            await ExecuteAsync(connection, migration,
+                "ALTER TABLE app_settings ADD COLUMN expire_on_exit INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 3;", token);
+            await migration.CommitAsync(token);
+            await ValidateSchemaShapeAsync(connection, includeShortcut: true, includeExitPolicy: true, token);
             return;
         }
 
@@ -152,16 +251,17 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
             CREATE TABLE app_settings (
               singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
               start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
-              global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space');
-            PRAGMA user_version = 2;
+              global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space', expire_on_exit INTEGER NOT NULL DEFAULT 0);
+            PRAGMA user_version = 3;
             """;
         await ExecuteAsync(connection, transaction, sql, token);
         await WriteSettingsAsync(connection, transaction, AppSettings.Default, token);
         await transaction.CommitAsync(token);
-        await ValidateSchemaShapeAsync(connection, includeShortcut: true, token);
+        await ValidateSchemaShapeAsync(connection, includeShortcut: true, includeExitPolicy: true, token);
     }
 
-    private static async Task ValidateSchemaShapeAsync(SqliteConnection connection, bool includeShortcut, CancellationToken token)
+    private static async Task ValidateSchemaShapeAsync(
+        SqliteConnection connection, bool includeShortcut, bool includeExitPolicy, CancellationToken token)
     {
         Dictionary<string, string> expected = new(StringComparer.Ordinal)
         {
@@ -172,7 +272,12 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
                   text_value TEXT NULL, url_value TEXT NULL, title TEXT NULL, path_value TEXT NULL, file_kind INTEGER NULL,
                   size_bytes INTEGER NULL, modified_at TEXT NULL, availability INTEGER NULL)
                 """,
-            ["app_settings"] = includeShortcut ? """
+            ["app_settings"] = includeExitPolicy ? """
+                CREATE TABLE app_settings (
+                  singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
+                  start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
+                  global_shortcut TEXT NOT NULL DEFAULT 'Ctrl+Alt+Space', expire_on_exit INTEGER NOT NULL DEFAULT 0)
+                """ : includeShortcut ? """
                 CREATE TABLE app_settings (
                   singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1), dock_edge INTEGER NOT NULL, retention_seconds INTEGER NOT NULL,
                   start_at_login INTEGER NOT NULL, reduce_motion INTEGER NOT NULL, high_contrast INTEGER NOT NULL,
@@ -253,11 +358,12 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut FROM app_settings WHERE singleton=1;";
+        command.CommandText = "SELECT dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut,expire_on_exit FROM app_settings WHERE singleton=1;";
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(token);
         return !await reader.ReadAsync(token)
             ? throw new ShelfStoreException(StoreErrorCode.CorruptData, "Stored settings are missing.")
-            : AppSettings.Create(CheckedEnum<DockEdge>(ReadInt32(reader, 0)), TimeSpan.FromSeconds(ReadInt64(reader, 1)), ReadBoolean(reader, 2), ReadBoolean(reader, 3), ReadBoolean(reader, 4), reader.GetString(5));
+            : AppSettings.Create(CheckedEnum<DockEdge>(ReadInt32(reader, 0)), TimeSpan.FromSeconds(ReadInt64(reader, 1)),
+                ReadBoolean(reader, 2), ReadBoolean(reader, 3), ReadBoolean(reader, 4), reader.GetString(5), ReadBoolean(reader, 6));
     }
 
     private static async Task InsertItemAsync(SqliteConnection connection, SqliteTransaction transaction, ShelfItem item, CancellationToken token)
@@ -288,10 +394,11 @@ public sealed class SqliteShelfStore : IShelfStore, ISettingsStore
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "INSERT INTO app_settings(singleton,dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut) VALUES(1,$edge,$retention,$startup,$motion,$contrast,$shortcut) ON CONFLICT(singleton) DO UPDATE SET dock_edge=$edge,retention_seconds=$retention,start_at_login=$startup,reduce_motion=$motion,high_contrast=$contrast,global_shortcut=$shortcut;";
+        command.CommandText = "INSERT INTO app_settings(singleton,dock_edge,retention_seconds,start_at_login,reduce_motion,high_contrast,global_shortcut,expire_on_exit) VALUES(1,$edge,$retention,$startup,$motion,$contrast,$shortcut,$exit) ON CONFLICT(singleton) DO UPDATE SET dock_edge=$edge,retention_seconds=$retention,start_at_login=$startup,reduce_motion=$motion,high_contrast=$contrast,global_shortcut=$shortcut,expire_on_exit=$exit;";
         Add(command, "$edge", (int)settings.DockEdge); Add(command, "$retention", checked((long)settings.Retention.TotalSeconds));
         Add(command, "$startup", settings.StartAtLogin); Add(command, "$motion", settings.ReduceMotion); Add(command, "$contrast", settings.HighContrast);
         Add(command, "$shortcut", settings.GlobalShortcut);
+        Add(command, "$exit", settings.ExpireOnExit);
         _ = await command.ExecuteNonQueryAsync(token);
     }
 
