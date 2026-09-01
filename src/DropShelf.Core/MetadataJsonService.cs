@@ -1,12 +1,12 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Diagnostics.CodeAnalysis;
 
 namespace DropShelf.Core;
 
 public sealed class MetadataJsonService
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -43,31 +43,57 @@ public sealed class MetadataJsonService
         try
         {
             RejectDuplicateProperties(json);
-            MetadataDocument document = JsonSerializer.Deserialize<MetadataDocument>(json, Options)
-                ?? throw Input.Error(ValidationErrorCode.InvalidExport, nameof(json), "Export data is empty.");
-            if (document.SchemaVersion != CurrentSchemaVersion)
-            {
-                throw Input.Error(ValidationErrorCode.InvalidExport, nameof(document.SchemaVersion), "The export schema version is unsupported.");
-            }
+            using JsonDocument parsed = JsonDocument.Parse(json.ToArray());
+            int schemaVersion = ReadSchemaVersion(parsed.RootElement);
 
-            if (document.ExportedAt == default)
+            return schemaVersion switch
             {
-                throw Input.Error(ValidationErrorCode.InvalidExport, nameof(document.ExportedAt), "The export timestamp is required.");
-            }
-
-            if (document.Items is null || document.Settings is null || document.Items.Length > DomainLimits.MaxItems)
-            {
-                throw Input.Error(ValidationErrorCode.InvalidExport, nameof(document.Items), "Export content is missing or too large.");
-            }
-
-            ShelfSession session = new(document.Items.Select(item => item.ToDomain()));
-            return new([.. session.Items], document.Settings.ToDomain());
+                1 => ImportVersionOne(json),
+                CurrentSchemaVersion => ImportCurrent(json),
+                _ => throw Input.Error(ValidationErrorCode.InvalidExport, nameof(schemaVersion), "The export schema version is unsupported."),
+            };
         }
         catch (ShelfValidationException) { throw; }
         catch (Exception exception) when (exception is JsonException or NotSupportedException or FormatException or OverflowException)
         {
             throw new ShelfValidationException(ValidationErrorCode.InvalidExport, nameof(json), "Export data is malformed.");
         }
+    }
+
+    private static int ReadSchemaVersion(JsonElement root) =>
+        root.ValueKind == JsonValueKind.Object &&
+        root.TryGetProperty("schemaVersion", out JsonElement schemaElement) &&
+        schemaElement.TryGetInt32(out int schemaVersion)
+            ? schemaVersion
+            : throw Input.Error(ValidationErrorCode.InvalidExport, nameof(root), "The export schema version is required.");
+
+    private static StoreSnapshot ImportCurrent(ReadOnlySpan<byte> json)
+    {
+        MetadataDocument document = JsonSerializer.Deserialize<MetadataDocument>(json, Options)
+            ?? throw Input.Error(ValidationErrorCode.InvalidExport, nameof(json), "Export data is empty.");
+        return Validate(document.ExportedAt, document.Settings?.ToDomain(), document.Items);
+    }
+
+    private static StoreSnapshot ImportVersionOne(ReadOnlySpan<byte> json)
+    {
+        MetadataDocumentV1 document = JsonSerializer.Deserialize<MetadataDocumentV1>(json, Options)
+            ?? throw Input.Error(ValidationErrorCode.InvalidExport, nameof(json), "Export data is empty.");
+        return Validate(document.ExportedAt, document.Settings?.ToDomain(), document.Items);
+    }
+
+    private static StoreSnapshot Validate(DateTimeOffset exportedAt, AppSettings? settings, ItemDto[]? items)
+    {
+        if (exportedAt == default)
+        {
+            throw Input.Error(ValidationErrorCode.InvalidExport, nameof(exportedAt), "The export timestamp is required.");
+        }
+        if (items is null || settings is null || items.Length > DomainLimits.MaxItems)
+        {
+            throw Input.Error(ValidationErrorCode.InvalidExport, nameof(items), "Export content is missing or too large.");
+        }
+
+        ShelfSession session = new(items.Select(item => item.ToDomain()));
+        return new([.. session.Items], settings);
     }
 
     private static void RejectDuplicateProperties(ReadOnlySpan<byte> json)
@@ -101,11 +127,25 @@ public sealed class MetadataJsonService
 
     private sealed record MetadataDocument([property: JsonRequired] int SchemaVersion, [property: JsonRequired] DateTimeOffset ExportedAt,
         [property: JsonRequired] SettingsDto Settings, [property: JsonRequired] ItemDto[] Items);
+
+    private sealed record MetadataDocumentV1([property: JsonRequired] int SchemaVersion, [property: JsonRequired] DateTimeOffset ExportedAt,
+        [property: JsonRequired] SettingsDtoV1 Settings, [property: JsonRequired] ItemDto[] Items);
+
     private sealed record SettingsDto([property: JsonRequired] DockEdge DockEdge, [property: JsonRequired] long RetentionSeconds,
+        [property: JsonRequired] bool StartAtLogin, [property: JsonRequired] bool ReduceMotion, [property: JsonRequired] bool HighContrast,
+        [property: JsonRequired] string GlobalShortcut, [property: JsonRequired] bool ExpireOnExit)
+    {
+        public static SettingsDto From(AppSettings value) => new(value.DockEdge, checked((long)value.Retention.TotalSeconds),
+            value.StartAtLogin, value.ReduceMotion, value.HighContrast, value.GlobalShortcut, value.ExpireOnExit);
+        public AppSettings ToDomain() => AppSettings.Create(DockEdge, TimeSpan.FromSeconds(RetentionSeconds), StartAtLogin,
+            ReduceMotion, HighContrast, GlobalShortcut, ExpireOnExit);
+    }
+
+    private sealed record SettingsDtoV1([property: JsonRequired] DockEdge DockEdge, [property: JsonRequired] long RetentionSeconds,
         [property: JsonRequired] bool StartAtLogin, [property: JsonRequired] bool ReduceMotion, [property: JsonRequired] bool HighContrast)
     {
-        public static SettingsDto From(AppSettings value) => new(value.DockEdge, checked((long)value.Retention.TotalSeconds), value.StartAtLogin, value.ReduceMotion, value.HighContrast);
-        public AppSettings ToDomain() => AppSettings.Create(DockEdge, TimeSpan.FromSeconds(RetentionSeconds), StartAtLogin, ReduceMotion, HighContrast);
+        public AppSettings ToDomain() => AppSettings.Create(DockEdge, TimeSpan.FromSeconds(RetentionSeconds), StartAtLogin,
+            ReduceMotion, HighContrast);
     }
 
     private sealed record ItemDto([property: JsonRequired] Guid Id, [property: JsonRequired] ShelfItemKind Kind,

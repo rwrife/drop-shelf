@@ -24,16 +24,27 @@ public sealed partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             string localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            string databasePath = Path.Combine(localData, "DropShelf", "shelf.db");
-            ISettingsStore settingsStore = new SqliteShelfStore(databasePath);
+            string appData = Path.Combine(localData, "DropShelf");
+            string databasePath = Path.Combine(appData, "shelf.db");
+            SqliteShelfStore store = new(databasePath);
+            ShelfDataService dataService = new(store);
+            BoundedMetadataCache metadataCache = new(Path.Combine(appData, "cache"));
+            try { _ = metadataCache.Cleanup(); } catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
             MainWindow? window = null;
             INativeShell nativeShell = CreateNativeShellForHost(() => Dispatcher.UIThread.Post(() => window?.ToggleVisibilityForHost()));
             window = new MainWindow(AppSettings.Default, new NativeShelfItemActions(nativeShell),
-                retryShelfLoad: () => CreateRetryShelfLoadForHost(window!, settingsStore, nativeShell)());
+                retryShelfLoad: () => LoadAndApplyStartupDataForHostAsync(window!, dataService, store, nativeShell));
+            window.ConfigureLocalDataForHost(dataService, AppSettings.Default);
+            window.ConfigureRecoveryForHost(store, metadataCache);
             desktop.MainWindow = window;
-            desktop.Exit += (_, _) => nativeShell.Dispose();
+            desktop.Exit += (_, _) =>
+            {
+                try { _ = window.PrepareForExitForHostAsync().GetAwaiter().GetResult(); } catch { }
+                nativeShell.Dispose();
+                store.Dispose();
+            };
             ConfigureTrayForHost(desktop, window);
-            _ = LoadAndApplyStartupSettingsForHostAsync(window, settingsStore, nativeShell);
+            _ = LoadAndApplyStartupDataForHostAsync(window, dataService, store, nativeShell);
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -161,6 +172,38 @@ public sealed partial class App : Application
     public static Func<Task> CreateRetryShelfLoadForHost(
         MainWindow window, ISettingsStore settingsStore, INativeShell nativeShell) =>
         () => LoadAndApplyStartupSettingsForHostAsync(window, settingsStore, nativeShell);
+
+    public static async Task LoadAndApplyStartupDataForHostAsync(
+        MainWindow window, ShelfDataService dataService, ISettingsStore? settingsStore = null,
+        INativeShell? nativeShell = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        ArgumentNullException.ThrowIfNull(dataService);
+        window.SetLocalDataLoadingForHost(true);
+        window.ShowShelfState(ShelfUiState.Loading);
+        try
+        {
+            ShelfLoadResult loaded = await dataService.LoadAsync(cancellationToken);
+            window.ConfigureLocalDataForHost(dataService, loaded.Snapshot.Settings);
+            window.ApplySnapshotForHost(loaded.Snapshot);
+            NativeShellStatus? shortcutStatus = null;
+            if (nativeShell is not null && settingsStore is not null)
+            {
+                window.ConfigureNativeSettingsForHost(settingsStore, nativeShell, loaded.Snapshot.Settings);
+                shortcutStatus = ConfigureShortcutForHost(window, nativeShell, loaded.Snapshot.Settings.GlobalShortcut);
+            }
+            window.SetLocalDataLoadingForHost(false);
+            window.ShowShelfState(loaded.ExpiredItems > 0 ? ShelfUiState.Expired : ShelfUiState.Ready);
+            if (shortcutStatus is not null and not NativeShellStatus.Success)
+            {
+                window.ShowNativeShellStatus(shortcutStatus.Value);
+            }
+        }
+        catch
+        {
+            window.ShowShelfState(ShelfUiState.RecoverableError);
+        }
+    }
 
     public static async Task LoadAndApplyStartupSettingsForHostAsync(
         MainWindow window, ISettingsStore settingsStore, INativeShell? nativeShell = null,

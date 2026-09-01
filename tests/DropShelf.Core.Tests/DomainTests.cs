@@ -49,6 +49,22 @@ public sealed class DomainTests
     }
 
     [Fact]
+    public void PrivacyPolicyPreviewAndClearNeverAffectPinnedItems()
+    {
+        TimeSpan retention = TimeSpan.FromHours(1);
+        ShelfSession session = new([
+            Item(1, Now - retention),
+            Item(2, Now - retention, true),
+            Item(3, Now),
+        ]);
+
+        Assert.Equal(1, session.CountExpiring(Now, retention));
+        Assert.Equal(2, session.CountUnpinned());
+        Assert.Equal(2, session.ClearUnpinned());
+        Assert.Equal(GuidFrom(2), Assert.Single(session.Items).Id);
+    }
+
+    [Fact]
     public void MissingFilesCanTransitionInBothDirectionsWithoutMutationOperations()
     {
         string path = Path.GetFullPath("source.txt");
@@ -62,20 +78,47 @@ public sealed class DomainTests
     }
 
     [Fact]
-    public void MetadataExportRoundTripsWithoutAnyFileContents()
+    public void MetadataExportRoundTripsAllSettingsWithoutAnyFileContents()
     {
         string path = Path.GetFullPath("private.bin");
-        StoreSnapshot snapshot = new([ShelfItem.Create(GuidFrom(1), "private.bin", FileReferencePayload.Create(path, sizeBytes: 123), Now)], AppSettings.Create(retention: TimeSpan.FromDays(2)));
+        StoreSnapshot snapshot = new([ShelfItem.Create(GuidFrom(1), "private.bin", FileReferencePayload.Create(path, sizeBytes: 123), Now)],
+            AppSettings.Create(retention: TimeSpan.FromDays(2), globalShortcut: "Ctrl+Shift+D", expireOnExit: true));
         MetadataJsonService service = new();
         byte[] json = service.Export(snapshot, Now);
         string text = Encoding.UTF8.GetString(json);
         StoreSnapshot imported = service.Import(json);
         Assert.DoesNotContain("fileContents", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"schemaVersion\": 2", text, StringComparison.Ordinal);
         Assert.Equal(path, ((FileReferencePayload)imported.Items.Single().Payload).Path);
         Assert.Equal(TimeSpan.FromDays(2), imported.Settings.Retention);
-        Assert.Equal(AppSettings.DefaultGlobalShortcut, imported.Settings.GlobalShortcut);
+        Assert.Equal("Ctrl+Shift+D", imported.Settings.GlobalShortcut);
+        Assert.True(imported.Settings.ExpireOnExit);
         Assert.Equal(ValidationErrorCode.InvalidExport, Assert.Throws<ShelfValidationException>(() => service.Import("{}"u8)).Code);
         Assert.Equal(ValidationErrorCode.InvalidExport, Assert.Throws<ShelfValidationException>(() => service.Import(new byte[DomainLimits.MaxExportBytes + 1])).Code);
+    }
+
+    [Fact]
+    public void VersionOneMetadataImportUsesNewPrivacyDefaults()
+    {
+        const string json = /*lang=json,strict*/ """
+            {
+              "schemaVersion": 1,
+              "exportedAt": "2026-01-02T03:04:05+00:00",
+              "settings": {
+                "dockEdge": "right",
+                "retentionSeconds": 86400,
+                "startAtLogin": false,
+                "reduceMotion": false,
+                "highContrast": false
+              },
+              "items": []
+            }
+            """;
+
+        AppSettings settings = new MetadataJsonService().Import(Encoding.UTF8.GetBytes(json)).Settings;
+
+        Assert.Equal(AppSettings.DefaultGlobalShortcut, settings.GlobalShortcut);
+        Assert.False(settings.ExpireOnExit);
     }
 
     [Fact]
@@ -84,7 +127,60 @@ public sealed class DomainTests
         Assert.Equal(DockEdge.Right, AppSettings.Default.DockEdge);
         Assert.Equal(TimeSpan.FromHours(24), AppSettings.Default.Retention);
         Assert.False(AppSettings.Default.StartAtLogin);
+        Assert.False(AppSettings.Default.ExpireOnExit);
         _ = Assert.Throws<ShelfValidationException>(() => AppSettings.Create(retention: TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task DataServiceLoadsAndPersistsDurationExpiryWithoutTouchingPinnedItems()
+    {
+        AppSettings settings = AppSettings.Create(retention: TimeSpan.FromHours(1));
+        RecordingStore store = new(new StoreSnapshot([
+            Item(1, Now - TimeSpan.FromHours(2)),
+            Item(2, Now - TimeSpan.FromHours(2), true),
+        ], settings));
+        ShelfDataService service = new(store, new FixedClock(Now));
+
+        ShelfLoadResult loaded = await service.LoadAsync();
+
+        Assert.Equal(1, loaded.ExpiredItems);
+        Assert.Equal(GuidFrom(2), Assert.Single(loaded.Snapshot.Items).Id);
+        Assert.Equal(GuidFrom(2), Assert.Single(store.Saved!.Items).Id);
+    }
+
+    [Fact]
+    public async Task DataServicePreviewsPolicyAndAppliesImportOnlyAfterAtomicSave()
+    {
+        ShelfSession session = new([Item(1, Now - TimeSpan.FromDays(2)), Item(2, Now, true)]);
+        RecordingStore store = new(new StoreSnapshot([], AppSettings.Default));
+        ShelfDataService service = new(store, new FixedClock(Now));
+
+        Assert.Equal(1, service.PreviewPolicyChange(session, TimeSpan.FromDays(1), expireOnExit: false));
+        Assert.Equal(1, service.PreviewPolicyChange(session, TimeSpan.FromDays(1), expireOnExit: true));
+        PolicyChangeResult changed = await service.ChangePolicyAsync(
+            session, AppSettings.Default, TimeSpan.FromDays(1), expireOnExit: false);
+
+        Assert.Equal(1, changed.AffectedItems);
+        Assert.Equal(GuidFrom(2), Assert.Single(session.Items).Id);
+
+        byte[] hostile = /*lang=json,strict*/ "{\"schemaVersion\":999}"u8.ToArray();
+        _ = await Assert.ThrowsAsync<ShelfValidationException>(() => service.ImportAsync(hostile, session));
+        Assert.Equal(GuidFrom(2), Assert.Single(session.Items).Id);
+    }
+
+    [Fact]
+    public async Task ExitAndClearControlsPersistOnlyAppMetadata()
+    {
+        ShelfSession session = new([Item(1, Now), Item(2, Now, true)]);
+        RecordingStore store = new(new StoreSnapshot([], AppSettings.Default));
+        ShelfDataService service = new(store, new FixedClock(Now));
+
+        Assert.Equal(1, await service.PrepareForExitAsync(session, AppSettings.Create(expireOnExit: true)));
+        Assert.Equal(GuidFrom(2), Assert.Single(session.Items).Id);
+        Assert.Equal(0, await service.ClearUnpinnedAsync(session, AppSettings.Default));
+        AppSettings reset = await service.ClearAllAsync(session);
+        Assert.Empty(session.Items);
+        Assert.Equal(AppSettings.Default, reset);
     }
 
     [Fact]
@@ -113,7 +209,7 @@ public sealed class DomainTests
         unknown["unexpected"] = true;
         AssertInvalid(unknown.ToJsonString());
         string valid = root.ToJsonString();
-        AssertInvalid(valid.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1", StringComparison.Ordinal));
+        AssertInvalid(valid.Replace("\"schemaVersion\":2", "\"schemaVersion\":2,\"schemaVersion\":2", StringComparison.Ordinal));
         AssertInvalid(valid.Replace("\"dockEdge\":\"right\"", "\"dockEdge\":\"right\",\"dockEdge\":\"right\"", StringComparison.Ordinal));
         JsonObject missing = (JsonObject)root.DeepClone();
         _ = missing.Remove("exportedAt");
@@ -158,6 +254,22 @@ public sealed class DomainTests
         public bool Exists { get; set; } = exists;
         public bool FileExists(string path) => Exists;
         public bool DirectoryExists(string path) => Exists;
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : IClock
+    {
+        public DateTimeOffset UtcNow => now;
+    }
+
+    private sealed class RecordingStore(StoreSnapshot snapshot) : IShelfStore
+    {
+        public StoreSnapshot? Saved { get; private set; }
+        public Task<StoreSnapshot> LoadAsync(CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+        public Task SaveAsync(StoreSnapshot value, CancellationToken cancellationToken = default)
+        {
+            Saved = value;
+            return Task.CompletedTask;
+        }
     }
 }
 
