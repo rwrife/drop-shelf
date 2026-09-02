@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Quality (${{ matrix.os }})
+  quality-and-package:
+    name: Quality and package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: 8.0.423
 
@@ -40,3 +40,31 @@ jobs:
 
       - name: Test
         run: dotnet test DropShelf.sln --configuration Release --no-build --no-restore
+
+      - name: Package and smoke-test Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/package-windows.ps1
+
+      - name: Package and smoke-test macOS artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ./scripts/ci/package-macos.sh
+
+      - name: Upload Windows packages
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DropShelf-windows
+          path: artifacts/windows/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload macOS packages
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DropShelf-macos
+          path: artifacts/macos/*
+          if-no-files-found: error
+          retention-days: 14
