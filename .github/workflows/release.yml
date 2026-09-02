@@ -1,0 +1,162 @@
+name: Release candidate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    name: Verify and package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.423
+
+      - name: Verify Windows source and capture output
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item artifacts/evidence/windows -ItemType Directory -Force | Out-Null
+          $Log = "artifacts/evidence/windows/verification-windows.log"
+          dotnet restore DropShelf.sln 2>&1 | Tee-Object -FilePath $Log -Append
+          dotnet format DropShelf.sln --verify-no-changes --no-restore 2>&1 | Tee-Object -FilePath $Log -Append
+          dotnet build DropShelf.sln --configuration Release --no-restore 2>&1 | Tee-Object -FilePath $Log -Append
+          dotnet test DropShelf.sln --configuration Release --no-build --no-restore --logger "trx;LogFileName=DropShelf-windows.trx" --results-directory artifacts/evidence/windows 2>&1 | Tee-Object -FilePath $Log -Append
+
+      - name: Verify macOS source and capture output
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/evidence/macos
+          log=artifacts/evidence/macos/verification-macos.log
+          dotnet restore DropShelf.sln 2>&1 | tee -a "$log"
+          dotnet format DropShelf.sln --verify-no-changes --no-restore 2>&1 | tee -a "$log"
+          dotnet build DropShelf.sln --configuration Release --no-restore 2>&1 | tee -a "$log"
+          dotnet test DropShelf.sln --configuration Release --no-build --no-restore --logger "trx;LogFileName=DropShelf-macos.trx" --results-directory artifacts/evidence/macos 2>&1 | tee -a "$log"
+
+      - name: Package and smoke-test Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $Version = $env:GITHUB_REF_NAME -replace '^v', ''
+          ./scripts/ci/package-windows.ps1 -Version $Version *>&1 | Tee-Object -FilePath artifacts/evidence/windows/verification-windows.log -Append
+          Copy-Item artifacts/evidence/windows/verification-windows.log artifacts/windows/
+          Copy-Item artifacts/evidence/windows/DropShelf-windows.trx artifacts/windows/
+          @"
+          tag=$env:GITHUB_REF_NAME
+          commit=$env:GITHUB_SHA
+          runner=$env:RUNNER_OS
+          actual_command_output=verification-windows.log
+          test_result=DropShelf-windows.trx
+          ZIP_packaged_smoke=PASS
+          unpacked_MSIX_packaged_smoke=PASS
+          signing=unsigned development artifact
+          "@ | Set-Content artifacts/windows/verification-windows.txt -Encoding utf8
+
+      - name: Package and smoke-test macOS artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PACKAGE_VERSION="${GITHUB_REF_NAME#v}"
+          ./scripts/ci/package-macos.sh 2>&1 | tee -a artifacts/evidence/macos/verification-macos.log
+          cp artifacts/evidence/macos/verification-macos.log artifacts/macos/
+          cp artifacts/evidence/macos/DropShelf-macos.trx artifacts/macos/
+          cat > artifacts/macos/verification-macos.txt <<EOF
+          tag=$GITHUB_REF_NAME
+          commit=$GITHUB_SHA
+          runner=$RUNNER_OS
+          actual_command_output=verification-macos.log
+          test_result=DropShelf-macos.trx
+          native_architecture_packaged_smoke=PASS
+          signing=ad-hoc only; not Developer ID signed or notarized
+          EOF
+
+      - name: Upload Windows packages and evidence
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DropShelf-windows-${{ github.ref_name }}
+          path: artifacts/windows/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS packages and evidence
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: DropShelf-macos-${{ github.ref_name }}
+          path: artifacts/macos/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish prerelease
+    needs: verify-and-package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Download verified packages
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: DropShelf-*-${{ github.ref_name }}
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Verify release asset set and checksums
+        run: python3 scripts/ci/verify-release-assets.py --root release-artifacts
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_file=$(mktemp)
+          cp docs/release-notes.md "$notes_file"
+          cat >> "$notes_file" <<EOF
+
+          ## Build verification for this tag
+
+          Both release matrix jobs completed restore, formatting, Release build, the full automated test suite, packaging, and packaged smoke tests before this prerelease was created. Actual combined command output and TRX test results are attached for both platforms, alongside commit-bound verification summaries.
+
+          Workflow evidence: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          assets=()
+          while IFS= read -r -d '' file; do
+            assets+=("$file")
+          done < <(find release-artifacts -maxdepth 1 -type f \( -name '*.zip' -o -name '*.msix' -o -name '*.dmg' -o -name '*.json' -o -name '*.txt' -o -name '*.log' -o -name '*.trx' \) -print0 | sort -z)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release artifacts were downloaded." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --prerelease \
+            --title "Drop Shelf $GITHUB_REF_NAME" \
+            --notes-file "$notes_file"

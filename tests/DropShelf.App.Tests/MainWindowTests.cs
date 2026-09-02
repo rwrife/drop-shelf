@@ -12,6 +12,14 @@ namespace DropShelf.App.Tests;
 
 public sealed class MainWindowTests
 {
+    [Fact]
+    public async Task PackagedSmokeModeExercisesAddRestoreAndClearWithoutStartingTheUi()
+    {
+        int result = await PackagedSmokeTest.RunAsync();
+
+        Assert.Equal(0, result);
+    }
+
     private static readonly DateTimeOffset Now = new(2026, 8, 27, 12, 0, 0, TimeSpan.Zero);
     private static readonly string[] CommandButtonNames =
         ["MoveUpButton", "MoveDownButton", "CopyButton", "OpenButton", "RevealButton", "PinButton", "RemoveButton", "ClearButton", "CollapseButton"];

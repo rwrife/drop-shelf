@@ -73,7 +73,7 @@ The shelf must be fully usable without drag gestures: global reveal, logical tab
 
 ## Current status
 
-**Privacy/resilience controls and native-shell policy/composition are implemented; target-host verification and packaging remain in progress.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence with v1-to-v3 migration, schema-v2 JSON metadata export with schema-v1 import compatibility, an Avalonia docked shelf with inbound/outbound drag wiring, explicit retention/clear/export/import/recovery controls, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, native open/reveal actions, tray/menu composition, login policy, and architecture-boundary tests. No installer or signed/notarized package is claimed yet.
+**Release-candidate packaging is implemented; physical Windows/macOS verification and production signing remain explicit gaps.** The repository contains a pinned .NET 8 solution, a UI-free validated shelf domain, versioned SQLite persistence with v1-to-v3 migration, schema-v2 JSON metadata export with schema-v1 import compatibility, an Avalonia docked shelf with inbound/outbound drag wiring, explicit retention/clear/export/import/recovery controls, keyboard and pointer commands, deterministic focus policy, accessible card metadata and live status, native open/reveal actions, tray/menu composition, login policy, architecture-boundary tests, and pinned CI/release workflows that produce self-contained Windows/macOS artifacts, checksums, an SPDX inventory, and packaged persistence smoke evidence. Windows packages remain unsigned; macOS packages are ad-hoc signed but not Developer ID signed or notarized. No production-signed/notarized package or physical target-host compatibility result is claimed.
 
 ## Core domain and local store
 
@@ -161,7 +161,31 @@ GitHub Actions runs the formatting, Release build, and test gates on its configu
 
 Headless tests verify the shell composition without opening a native window. They are not a substitute for manual Windows/macOS launch, accessibility, drag/drop, or destination-application testing.
 
-Platform packaging will use a Windows self-contained ZIP/MSIX path and a signed/notarizable macOS `.app`/DMG path. Signing and notarization credentials are not expected for ordinary local development.
+## Release-candidate artifacts
+
+CI runs restore, formatting, Release build, and the full automated test suite before packaging. The pinned packaging workflows then produce:
+
+- `DropShelf-win-x64.zip`: self-contained Windows x64 folder, unsigned;
+- `DropShelf-win-x64.msix`: unsigned full-trust MSIX packaging evidence, validated by MakeAppx pack/unpack;
+- `DropShelf-macos-x64.app.zip` and `.dmg`: self-contained Intel app, ad-hoc signed only;
+- `DropShelf-macos-arm64.app.zip` and `.dmg`: self-contained Apple-silicon app, ad-hoc signed only;
+- platform SHA-256 checksum lists and platform-specific SPDX 2.3 NuGet dependency inventories.
+
+The package smoke mode runs from the extracted Windows ZIP, unpacked MSIX, and the macOS app matching the runner architecture. It verifies executable startup plus transactional add, restore, clear, and cleanup in a unique temporary directory. It does not open a window or prove real drag/drop, shell, installer, Narrator, or VoiceOver behavior.
+
+With the required target SDK installed, packaging can be reproduced from a clean checkout:
+
+```powershell
+# Windows PowerShell
+.\scripts\ci\package-windows.ps1
+```
+
+```bash
+# macOS
+./scripts/ci/package-macos.sh
+```
+
+Read [install/update/uninstall guidance](docs/install-and-uninstall.md), the [packaged smoke ledger](docs/packaged-smoke-test.md), and the [release checklist](docs/release-checklist.md). The checklist explicitly blocks a generally available release until production signing/notarization and physical Windows/macOS, Narrator, and VoiceOver results exist. There is no auto-updater; installation and updates are explicit user actions.
 
 ## Drag/drop architecture (issue #3)
 
